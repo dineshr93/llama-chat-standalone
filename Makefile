@@ -15,6 +15,11 @@ MODEL_ID ?= local-model
 N_CTX ?= 8192
 LLAMA_CPP_DIR ?= ../llama.cpp
 
+# Container runtime: use docker when installed, otherwise fall back to podman.
+# `podman compose` shells out to podman-compose (uv tool install podman-compose).
+CONTAINER_CLI ?= $(shell command -v docker >/dev/null 2>&1 && echo docker || echo podman)
+COMPOSE := $(CONTAINER_CLI) compose
+
 export PORT UPSTREAM MODEL_ID N_CTX
 
 .PHONY: help install build dev start stop restart status logs test sync-ui \
@@ -72,14 +77,14 @@ sync-ui: ## Copy the UI from LLAMA_CPP_DIR into this repo
 deploy: ## Build the image, (re)start the container, drop the old image
 	@# .env is authoritative for the container: the exported host defaults
 	@# (127.0.0.1) would point the proxy at itself inside the container.
-	env -u PORT -u UPSTREAM -u MODEL_ID -u N_CTX docker compose up -d --build
-	@docker image prune -f >/dev/null
+	env -u PORT -u UPSTREAM -u MODEL_ID -u N_CTX $(COMPOSE) up -d --build
+	@$(CONTAINER_CLI) image prune -f >/dev/null
 
 docker-down: ## Stop the container and remove its image
-	docker compose down --rmi local
+	$(COMPOSE) down --rmi local
 
 docker-logs: ## Tail the container log
-	docker compose logs -f
+	$(COMPOSE) logs -f
 
 clean: ## Remove build output and runtime files
 	rm -rf $(DIST) $(RUN_DIR) $(APP_DIR)/.svelte-kit
