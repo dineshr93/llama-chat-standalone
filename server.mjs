@@ -159,9 +159,9 @@ function upstreamHeaders(req) {
 }
 
 /** Buffered request, for the two endpoints that may need a fallback body. */
-function fetchUpstream(req, body) {
+function fetchUpstream(req, body, pathOverride) {
 	return new Promise((resolve) => {
-		const url = new URL(UPSTREAM + req.url);
+		const url = new URL(UPSTREAM + (pathOverride ?? req.url));
 		const request = http.request(
 			{
 				headers: upstreamHeaders(req),
@@ -185,11 +185,12 @@ function fetchUpstream(req, body) {
 	});
 }
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, extraHeaders = {}) {
 	const body = JSON.stringify(payload);
 	res.writeHead(status, {
 		'content-length': Buffer.byteLength(body),
-		'content-type': 'application/json; charset=utf-8'
+		'content-type': 'application/json; charset=utf-8',
+		...extraHeaders
 	});
 	res.end(body);
 }
@@ -275,18 +276,36 @@ async function handleApi(req, res) {
 	const pathname = req.url.split('?')[0];
 
 	if (pathname === '/props') {
+		// The UI reads model capabilities (vision/audio/video) from /props at page
+		// load. A response without cache-control gets heuristic-cached by the
+		// browser, so one synthesized fallback served during an upstream blip
+		// would stick forever and wrongly hide image upload. Never cache /props.
+		const NO_STORE = { 'cache-control': 'no-store' };
 		const { body, status } = await fetchUpstream(req);
 		if (status === 200) {
 			try {
 				const parsed = JSON.parse(body.toString());
 				// this server answers /cors-proxy itself, so the UI may offer it
 				parsed.cors_proxy_enabled = true;
-				return sendJson(res, 200, parsed);
+				return sendJson(res, 200, parsed, NO_STORE);
+			} catch {
+				// fall through to the bare retry
+			}
+		}
+		// The upstream rejected this exact request — some engines do not accept
+		// query params like autoload=false. Retry the bare /props, which every
+		// OpenAI-compatible server answers, before inventing anything.
+		const retry = await fetchUpstream(req, undefined, '/props');
+		if (retry.status === 200) {
+			try {
+				const parsed = JSON.parse(retry.body.toString());
+				parsed.cors_proxy_enabled = true;
+				return sendJson(res, 200, parsed, NO_STORE);
 			} catch {
 				// fall through to the synthesized props
 			}
 		}
-		return sendJson(res, 200, synthProps());
+		return sendJson(res, 200, synthProps(), NO_STORE);
 	}
 
 	if (pathname === '/v1/models') {
