@@ -49,8 +49,9 @@ from `.env` if you export it.
 ## Docker
 
 ```sh
-make deploy               # docker build + docker compose up -d
-make docker-down
+make deploy               # build image, (re)start container, prune old image
+make docker-down          # stop container and remove its image
+make docker-logs
 ```
 
 `docker-compose.yml` maps `host.docker.internal` to the host, so `UPSTREAM` can

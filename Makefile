@@ -18,7 +18,7 @@ LLAMA_CPP_DIR ?= ../llama.cpp
 export PORT UPSTREAM MODEL_ID N_CTX
 
 .PHONY: help install build dev start stop restart status logs test sync-ui \
-        docker-build docker-up docker-down docker-logs deploy clean
+        deploy docker-down docker-logs clean
 
 help: ## Show this help
 	@echo "llama-chat-standalone"
@@ -69,19 +69,17 @@ test: ## Run the server self-check
 sync-ui: ## Copy the UI from LLAMA_CPP_DIR into this repo
 	./scripts/sync-ui.sh $(LLAMA_CPP_DIR)
 
-docker-build: ## Build the container image
-	docker build -t llama-chat-standalone .
+deploy: ## Build the image, (re)start the container, drop the old image
+	@# .env is authoritative for the container: the exported host defaults
+	@# (127.0.0.1) would point the proxy at itself inside the container.
+	env -u PORT -u UPSTREAM -u MODEL_ID -u N_CTX docker compose up -d --build
+	@docker image prune -f >/dev/null
 
-docker-up: ## Run the container in the background
-	docker compose up -d
-
-docker-down: ## Stop the container
-	docker compose down
+docker-down: ## Stop the container and remove its image
+	docker compose down --rmi local
 
 docker-logs: ## Tail the container log
 	docker compose logs -f
-
-deploy: docker-build docker-up ## Build and run the container
 
 clean: ## Remove build output and runtime files
 	rm -rf $(DIST) $(RUN_DIR) $(APP_DIR)/.svelte-kit
