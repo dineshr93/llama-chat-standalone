@@ -77,7 +77,7 @@ sync-ui: ## Copy the UI from LLAMA_CPP_DIR into this repo
 deploy: ## Build the image, (re)start the container, drop the old image
 	@# .env is authoritative for the container: the exported host defaults
 	@# (127.0.0.1) would point the proxy at itself inside the container.
-	env -u PORT -u UPSTREAM -u MODEL_ID -u N_CTX $(COMPOSE) up -d --build
+	env -u PORT -u UPSTREAM -u MODEL_ID -u N_CTX $(COMPOSE) up -d --build --force-recreate
 	@$(CONTAINER_CLI) image prune -f >/dev/null
 
 docker-down: ## Stop the container and remove its image
