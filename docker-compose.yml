@@ -1,0 +1,16 @@
+services:
+  llama-chat:
+    build: .
+    image: llama-chat-standalone
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      UPSTREAM: ${UPSTREAM:-http://host.docker.internal:8888}
+      MODEL_ID: ${MODEL_ID:-local-model}
+      N_CTX: ${N_CTX:-8192}
+      CHAT_TEMPLATE: ${CHAT_TEMPLATE:-}
+      MODALITIES: ${MODALITIES:-}
+      API_KEY: ${API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
