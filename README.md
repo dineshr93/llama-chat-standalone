@@ -40,6 +40,10 @@ from `.env` if you export it.
 
 - Serves the built UI from `ui/apps/chat/dist`.
 - Proxies `/v1`, `/models`, `/slots`, `/tools` to `UPSTREAM`.
+- Normalizes `/v1/chat/completions` before forwarding: adds `model` when the UI
+  omits it (engines such as gufo require it) and drops non-positive `max_tokens`
+  (llama.cpp uses `-1` for "no limit", gufo rejects it). The SSE response still
+  streams straight through.
 - Answers `/props` and `/v1/models` itself when the upstream does not. llama.cpp
   serves `/props`; most other engines do not, and the UI needs it to enable the
   chat form.

@@ -196,11 +196,20 @@ function sendJson(res, status, payload, extraHeaders = {}) {
 }
 
 /** Streams the request to the model server and the answer back, unbuffered. */
-function proxy(req, res) {
+function proxy(req, res, body) {
 	const url = new URL(UPSTREAM + req.url);
+	const headers = upstreamHeaders(req);
+
+	if (body) {
+		// a modified body must carry its own length; the upstream request has
+		// already been consumed, so req.pipe() below no longer applies.
+		headers['content-length'] = String(body.length);
+		delete headers['transfer-encoding'];
+	}
+
 	const request = http.request(
 		{
-			headers: upstreamHeaders(req),
+			headers,
 			hostname: url.hostname,
 			method: req.method,
 			path: url.pathname + url.search,
@@ -216,7 +225,44 @@ function proxy(req, res) {
 		if (res.headersSent) return res.end();
 		sendJson(res, 502, { error: { message: `upstream unreachable: ${error.message}` } });
 	});
-	req.pipe(request);
+	if (body) request.end(body);
+	else req.pipe(request);
+}
+
+/** Buffered request body, for endpoints whose JSON must be adjusted first. */
+function readBody(req) {
+	return new Promise((resolve) => {
+		const chunks = [];
+		req.on('data', (chunk) => chunks.push(chunk));
+		req.on('end', () => resolve(Buffer.concat(chunks)));
+		req.on('error', () => resolve(Buffer.alloc(0)));
+	});
+}
+
+/**
+ * Some engines (gufo) require `model` even when serving a single model, while
+ * the llama.cpp UI omits it in MODEL mode. They also reject `max_tokens: -1`,
+ * which llama.cpp uses to mean "no limit". Normalize those two differences
+ * before forwarding; the rest of the request is passed through untouched.
+ */
+export function normalizeChatRequest(body) {
+	let parsed;
+
+	try {
+		parsed = JSON.parse(body.toString());
+	} catch {
+		return body;
+	}
+
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
+
+	if (!parsed.model) parsed.model = MODEL_ID;
+
+	if (typeof parsed.max_tokens === 'number' && parsed.max_tokens <= 0) {
+		delete parsed.max_tokens;
+	}
+
+	return Buffer.from(JSON.stringify(parsed));
 }
 
 /**
@@ -331,6 +377,15 @@ async function handleApi(req, res) {
 			return res.end(body);
 		}
 		return sendJson(res, 200, []);
+	}
+
+	// The llama.cpp UI omits `model` in single-model mode, but some engines
+	// (gufo) require it, and they reject llama.cpp's -1 "no limit" sentinel.
+	// Read the body once and normalize before proxying; the SSE response
+	// still streams straight through.
+	if (pathname === '/v1/chat/completions' && req.method === 'POST') {
+		const body = await readBody(req);
+		return proxy(req, res, normalizeChatRequest(body));
 	}
 
 	return proxy(req, res);

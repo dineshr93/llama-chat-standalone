@@ -23,6 +23,15 @@ const upstream = http.createServer((req, res) => {
 			.end('{"cors_proxy_enabled":false,"default_generation_settings":{"n_ctx":4096}}');
 		return;
 	}
+	if (req.url.startsWith('/v1/chat/completions')) {
+		const chunks = [];
+		req.on('data', (chunk) => chunks.push(chunk));
+		req.on('end', () => {
+			res.writeHead(200, { 'content-type': 'application/json' });
+			res.end(Buffer.concat(chunks).toString());
+		});
+		return;
+	}
 	res.writeHead(404).end('nope');
 });
 await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -62,6 +71,30 @@ assert.equal(liveProps.cors_proxy_enabled, true);
 const modelsRes = await fetch(`${base}/v1/models`);
 assert.equal(modelsRes.status, 200);
 assert.equal((await modelsRes.json()).data[0].id, 'test-model');
+
+// engines like gufo require `model`; the llama.cpp UI omits it in MODEL mode.
+// llama.cpp accepts max_tokens=-1, gufo rejects it. Both are normalized here.
+const chatRes = await fetch(`${base}/v1/chat/completions`, {
+	body: JSON.stringify({
+		max_tokens: -1,
+		messages: [{ content: 'hello', role: 'user' }],
+		stream: true
+	}),
+	headers: { 'content-type': 'application/json' },
+	method: 'POST'
+});
+assert.equal(chatRes.status, 200);
+const forwarded = await chatRes.json();
+assert.equal(forwarded.model, 'test-model');
+assert.equal('max_tokens' in forwarded, false);
+assert.equal(forwarded.messages[0].content, 'hello');
+
+const explicitModelRes = await fetch(`${base}/v1/chat/completions`, {
+	body: JSON.stringify({ messages: [{ content: 'hi', role: 'user' }], model: 'other-model' }),
+	headers: { 'content-type': 'application/json' },
+	method: 'POST'
+});
+assert.equal((await explicitModelRes.json()).model, 'other-model');
 
 const indexRes = await fetch(`${base}/`);
 assert.equal(indexRes.status, 200);
