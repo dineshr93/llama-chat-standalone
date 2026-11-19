@@ -39,10 +39,15 @@ from `.env` if you export it.
 ## What the server does
 
 - Serves the built UI from `ui/apps/chat/dist`.
-- Proxies `/v1`, `/models`, `/slots`, `/tools`, `/cors-proxy` to `UPSTREAM`.
+- Proxies `/v1`, `/models`, `/slots`, `/tools` to `UPSTREAM`.
 - Answers `/props` and `/v1/models` itself when the upstream does not. llama.cpp
   serves `/props`; most other engines do not, and the UI needs it to enable the
   chat form.
+- Answers `/cors-proxy?url=...` itself, forwarding only the headers the UI
+  prefixed with `x-llama-server-proxy-header-`. Remote MCP servers such as
+  `https://api.githubcopilot.com/mcp` allow CORS only from `localhost`, so a
+  page served on a LAN address cannot reach them directly. Turn on "use proxy"
+  for the MCP server in the UI to route it through here.
 - Sets `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` on
   `index.html`, which the UI's sandbox worker needs.
 

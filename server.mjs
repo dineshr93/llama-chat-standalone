@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,7 +25,10 @@ const MODALITIES = new Set(
 );
 
 // Paths the UI sends to the model server. Everything else is a static asset.
-const PROXY_PREFIXES = ['/v1', '/props', '/models', '/slots', '/tools', '/cors-proxy'];
+const PROXY_PREFIXES = ['/v1', '/props', '/models', '/slots', '/tools'];
+
+// The UI's MCP client prefixes the headers it wants forwarded to the target.
+const CORS_PROXY_HEADER_PREFIX = 'x-llama-server-proxy-header-';
 
 const MIME = {
 	'.css': 'text/css; charset=utf-8',
@@ -57,6 +61,7 @@ export function synthProps() {
 	return {
 		build_info: 'llama-chat-standalone',
 		chat_template: CHAT_TEMPLATE,
+		cors_proxy_enabled: true,
 		default_generation_settings: {
 			id: 0,
 			id_task: 0,
@@ -213,14 +218,73 @@ function proxy(req, res) {
 	req.pipe(request);
 }
 
+/**
+ * Forwards a request to an arbitrary URL for the UI's MCP client. Remote MCP
+ * servers only allow CORS from localhost, so a page served on a LAN address
+ * cannot reach them directly; this makes the request same-origin instead.
+ * Only headers the client explicitly prefixed are forwarded.
+ */
+function corsProxy(req, res) {
+	let target;
+	try {
+		target = new URL(new URL(req.url, 'http://localhost').searchParams.get('url') || '');
+	} catch {
+		return sendJson(res, 400, { error: { message: 'invalid target URL' } });
+	}
+
+	if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+		return sendJson(res, 400, { error: { message: `unsupported scheme ${target.protocol}` } });
+	}
+
+	const headers = {};
+	for (const [key, value] of Object.entries(req.headers)) {
+		if (!key.startsWith(CORS_PROXY_HEADER_PREFIX)) continue;
+		const name = key.slice(CORS_PROXY_HEADER_PREFIX.length);
+		if (name) headers[name] = value;
+	}
+	// the browser's own content-length is not prefixed, so carry it over
+	if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
+
+	const secure = target.protocol === 'https:';
+	const request = (secure ? https : http).request(
+		{
+			headers,
+			hostname: target.hostname,
+			method: req.method,
+			path: target.pathname + target.search,
+			port: target.port || (secure ? 443 : 80)
+		},
+		(response) => {
+			const out = { ...response.headers };
+			// route redirects back through the proxy, so each hop is checked
+			if (response.statusCode >= 300 && response.statusCode < 400 && out.location) {
+				out.location = '/cors-proxy?url=' + encodeURIComponent(new URL(out.location, target).href);
+			}
+			res.writeHead(response.statusCode, out);
+			response.pipe(res);
+		}
+	);
+	request.on('error', (error) => {
+		if (res.headersSent) return res.end();
+		sendJson(res, 502, { error: { message: `proxy target unreachable: ${error.message}` } });
+	});
+	req.pipe(request);
+}
+
 async function handleApi(req, res) {
 	const pathname = req.url.split('?')[0];
 
 	if (pathname === '/props') {
 		const { body, status } = await fetchUpstream(req);
 		if (status === 200) {
-			res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-			return res.end(body);
+			try {
+				const parsed = JSON.parse(body.toString());
+				// this server answers /cors-proxy itself, so the UI may offer it
+				parsed.cors_proxy_enabled = true;
+				return sendJson(res, 200, parsed);
+			} catch {
+				// fall through to the synthesized props
+			}
 		}
 		return sendJson(res, 200, synthProps());
 	}
@@ -290,6 +354,9 @@ function serveStatic(req, res) {
 export function createServer() {
 	return http.createServer((req, res) => {
 		const pathname = req.url.split('?')[0];
+
+		if (pathname === '/cors-proxy') return void corsProxy(req, res);
+
 		const isApi = PROXY_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
 
 		if (isApi) return void handleApi(req, res);
