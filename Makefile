@@ -75,8 +75,8 @@ sync-ui: ## Copy the UI from LLAMA_CPP_DIR into this repo
 	./scripts/sync-ui.sh $(LLAMA_CPP_DIR)
 
 deploy: ## Build the image, (re)start the container, drop the old image
-	@# .env is authoritative for the container: the exported host defaults
-	@# (127.0.0.1) would point the proxy at itself inside the container.
+	@# .env is authoritative for the container; the container shares the host
+	@# network namespace, so its UPSTREAM (127.0.0.1:8888) is the host's model server.
 	env -u PORT -u UPSTREAM -u MODEL_ID -u N_CTX $(COMPOSE) up -d --build --force-recreate
 	@$(CONTAINER_CLI) image prune -f >/dev/null
 

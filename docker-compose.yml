@@ -2,15 +2,15 @@ services:
   llama-chat:
     build: .
     image: llama-chat-standalone
-    ports:
-      - "${PORT:-8080}:8080"
+    # The model server publishes 8888 on the host loopback only, so a bridge
+    # container cannot reach it: host-gateway resolves to 172.17.0.1, where
+    # nothing listens. Share the host network namespace instead.
+    network_mode: host
     environment:
-      UPSTREAM: ${UPSTREAM:-http://host.docker.internal:8888}
+      UPSTREAM: ${UPSTREAM:-http://127.0.0.1:8888}
       MODEL_ID: ${MODEL_ID:-local-model}
       N_CTX: ${N_CTX:-8192}
       CHAT_TEMPLATE: ${CHAT_TEMPLATE:-}
       MODALITIES: ${MODALITIES:-}
       API_KEY: ${API_KEY:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
