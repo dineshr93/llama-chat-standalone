@@ -9,7 +9,7 @@ services:
     environment:
       UPSTREAM: ${UPSTREAM:-http://127.0.0.1:8888}
       MODEL_ID: ${MODEL_ID:-local-model}
-      N_CTX: ${N_CTX:-8192}
+      N_CTX: ${N_CTX:-65556}
       CHAT_TEMPLATE: ${CHAT_TEMPLATE:-}
       MODALITIES: ${MODALITIES:-}
       API_KEY: ${API_KEY:-}

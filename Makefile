@@ -12,7 +12,7 @@ LOG_FILE := $(RUN_DIR)/server.log
 PORT ?= 8080
 UPSTREAM ?= http://127.0.0.1:8888
 MODEL_ID ?= local-model
-N_CTX ?= 8192
+N_CTX ?= 65556
 LLAMA_CPP_DIR ?= ../llama.cpp
 
 # Container runtime: use docker when installed, otherwise fall back to podman.

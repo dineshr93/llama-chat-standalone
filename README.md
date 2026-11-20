@@ -31,7 +31,7 @@ from `.env` if you export it.
 | `HOST` | `0.0.0.0` | Bind address |
 | `UPSTREAM` | `http://127.0.0.1:8888` | OpenAI-compatible server |
 | `MODEL_ID` | `local-model` | Model id sent in requests |
-| `N_CTX` | `8192` | Context window reported to the UI |
+| `N_CTX` | `65556` | Context window reported to the UI |
 | `CHAT_TEMPLATE` | empty | Jinja chat template shown in the UI |
 | `MODALITIES` | empty | `vision`, `audio`, `video`, comma separated |
 | `API_KEY` | empty | Bearer token added when the client sends none |
