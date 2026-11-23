@@ -46,7 +46,7 @@ function deriveSingleTurnSections(
 		sections.push({
 			content: message.reasoningContent,
 			type: isPending ? AgenticSectionType.REASONING_PENDING : AgenticSectionType.REASONING,
-			wasInterrupted: !isStreaming && !hasContentAfterReasoning
+			wasInterrupted: !isStreaming && !hasContentAfterReasoning && !message.timings
 		});
 	}
 
