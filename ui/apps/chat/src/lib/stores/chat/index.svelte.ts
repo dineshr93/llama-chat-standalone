@@ -604,9 +604,11 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 		return this.isEditModeActive;
 	}
 
-	/** True while the active conversation has a live streaming pipe. */
+	/** True while the active conversation has a live streaming pipe or a running server session. */
 	isStreaming(): boolean {
-		return this.chatStreamingStates.has(conversationsStore.activeConversation?.id ?? '');
+		const convId = conversationsStore.activeConversation?.id ?? '';
+
+		return this.chatStreamingStates.has(convId) || this.activity.isRemote(convId);
 	}
 
 	/**
