@@ -68,6 +68,8 @@ class MCPStore implements McpHealthHost {
 	private health = new MCPHealthCheckManager(this);
 	private initPromise: Promise<boolean> | null = null;
 	private reconnectingServers = new Set<string>(); // Guard against concurrent reconnections
+	private serverConfigSignature: string | null = null;
+	private serverMcpAvailable = false;
 	private serverConfigs = new Map<string, MCPServerConfig>(); // Store configs for reconnection
 	private serversCache: { raw: unknown; servers: MCPServerSettingsEntry[] } | null = null;
 	private toolsIndex = new Map<string, string>();
@@ -330,6 +332,10 @@ class MCPStore implements McpHealthHost {
 			return false;
 		}
 
+		if (this.serverConfigSignature !== signature) {
+			await this.syncServerMcp(mcpConfig!, signature);
+		}
+
 		if (this.isInitialized && this.configSignature === signature) {
 			return true;
 		}
@@ -341,6 +347,31 @@ class MCPStore implements McpHealthHost {
 		if (this.connections.size > 0 || this.initPromise) await this.shutdown();
 
 		return this.initialize(signature, mcpConfig!);
+	}
+
+	/**
+	 * Publish the same settings to the standalone server so its MCP clients can
+	 * run tool calls even when the browser tab is hidden. Falls back to the
+	 * browser client when the endpoint is unavailable (e.g. `make dev`).
+	 */
+	private async syncServerMcp(config: MCPClientConfig, signature: string): Promise<void> {
+		if (!browser) return;
+
+		try {
+			const response = await fetch('/mcp/config', {
+				body: JSON.stringify({ servers: config.servers }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+
+			if (!response.ok) throw new Error(`MCP config sync failed: ${response.status}`);
+
+			this.serverMcpAvailable = true;
+			this.serverConfigSignature = signature;
+		} catch (error) {
+			console.warn('[MCP] Server-side MCP unavailable, using browser client:', error);
+			this.serverMcpAvailable = false;
+		}
 	}
 
 	async executeTool(toolCall: MCPToolCall, signal?: AbortSignal): Promise<ToolExecutionResult> {
@@ -359,6 +390,30 @@ class MCPStore implements McpHealthHost {
 		const serverName = this.toolsIndex.get(toolName);
 
 		if (!serverName) throw new Error(`Unknown tool: ${toolName}`);
+
+		if (this.serverMcpAvailable) {
+			try {
+				const response = await fetch('/mcp/call', {
+					body: JSON.stringify({ arguments: args, server: serverName, tool: toolName }),
+					headers: { 'content-type': 'application/json' },
+					method: 'POST',
+					signal
+				});
+
+				if (response.ok) return await response.json();
+
+				const payload = await response.json().catch(() => null);
+
+				if (response.status === 404) {
+					this.serverMcpAvailable = false;
+				} else {
+					throw new Error(payload?.error?.message || `MCP call failed: ${response.status}`);
+				}
+			} catch (error) {
+				if (error instanceof Error && error.name === 'AbortError') throw error;
+				// fall through to the browser client
+			}
+		}
 
 		const connection = this.connections.get(serverName);
 

@@ -7,7 +7,10 @@ RUN cd ui/apps/chat && npm ci && npm run build
 FROM node:24-alpine
 WORKDIR /app
 COPY server.mjs ./
+COPY mcp-background.mjs ./
 COPY --from=build /app/ui/apps/chat/dist ./ui/apps/chat/dist
+# ponytail: full UI node_modules is ~640MB; copy only SDK deps if image size matters
+COPY --from=build /app/ui/apps/chat/node_modules ./ui/apps/chat/node_modules
 ENV PORT=8080 UPSTREAM=http://127.0.0.1:8888 MODEL_ID=local-model N_CTX=65556
 EXPOSE 8080
 CMD ["node", "server.mjs"]

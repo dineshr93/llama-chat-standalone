@@ -10,6 +10,7 @@ import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { McpBackground } from './mcp-background.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST = process.env.DIST || path.join(ROOT, 'ui/apps/chat/dist');
@@ -790,6 +791,55 @@ async function handleApi(req, res) {
 	return proxy(req, res, undefined, BACKENDS[0]);
 }
 
+const mcpBackground = new McpBackground();
+
+async function handleMcp(req, res) {
+	const pathname = req.url.split('?')[0];
+
+	try {
+		if (pathname === '/mcp/config' && req.method === 'POST') {
+			const body = await readBody(req);
+			let parsed;
+			try {
+				parsed = JSON.parse(body.toString());
+			} catch {
+				return sendJson(res, 400, { error: { message: 'invalid JSON' } });
+			}
+			if (!parsed || typeof parsed !== 'object' || !parsed.servers || typeof parsed.servers !== 'object') {
+				return sendJson(res, 400, { error: { message: 'servers must be an object' } });
+			}
+
+			const origin = `http://${req.headers.host || `127.0.0.1:${PORT}`}`;
+			return sendJson(res, 200, await mcpBackground.configure(parsed.servers, origin));
+		}
+
+		if (pathname === '/mcp/call' && req.method === 'POST') {
+			const body = await readBody(req);
+			let parsed;
+			try {
+				parsed = JSON.parse(body.toString());
+			} catch {
+				return sendJson(res, 400, { error: { message: 'invalid JSON' } });
+			}
+			if (!parsed || typeof parsed.server !== 'string' || typeof parsed.tool !== 'string') {
+				return sendJson(res, 400, { error: { message: 'server and tool are required' } });
+			}
+
+			const args = parsed.arguments && typeof parsed.arguments === 'object' ? parsed.arguments : {};
+			return sendJson(res, 200, await mcpBackground.callTool(parsed.server, parsed.tool, args));
+		}
+
+		if (pathname === '/mcp/status') return sendJson(res, 200, mcpBackground.status());
+		if (pathname === '/mcp/tools') return sendJson(res, 200, mcpBackground.status().tools);
+
+		return sendJson(res, 404, { error: { message: 'not found' } });
+	} catch (error) {
+		return sendJson(res, 502, {
+			error: { message: error instanceof Error ? error.message : String(error) }
+		});
+	}
+}
+
 function serveStatic(req, res) {
 	const pathname = decodeURIComponent(req.url.split('?')[0]);
 	const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
@@ -825,16 +875,20 @@ function serveStatic(req, res) {
 }
 
 export function createServer() {
-	return http.createServer((req, res) => {
+	const server = http.createServer((req, res) => {
 		const pathname = req.url.split('?')[0];
 
 		if (pathname === '/cors-proxy') return void corsProxy(req, res);
+		if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return void handleMcp(req, res);
 
 		const isApi = PROXY_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
 
 		if (isApi) return void handleApi(req, res);
 		return serveStatic(req, res);
 	});
+
+	server.on('close', () => void mcpBackground.close());
+	return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

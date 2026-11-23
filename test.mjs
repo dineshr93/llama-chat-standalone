@@ -5,6 +5,7 @@
 // Run: node test.mjs
 
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -140,6 +141,47 @@ assert.equal(echoed.body, '{"jsonrpc":"2.0"}');
 
 const badProxyRes = await fetch(`${base}/cors-proxy?url=file%3A%2F%2F%2Fetc%2Fpasswd`);
 assert.equal(badProxyRes.status, 400);
+
+// server-owned MCP: configure a fake streamable-HTTP MCP server, then call a tool
+const sdkPath = new URL('./ui/apps/chat/node_modules/@modelcontextprotocol/sdk/dist/esm/', import.meta.url);
+const { McpServer } = await import(new URL('server/mcp.js', sdkPath).href);
+const { StreamableHTTPServerTransport } = await import(new URL('server/streamableHttp.js', sdkPath).href);
+
+const fakeMcpServer = new McpServer({ name: 'fake', version: '1.0.0' });
+fakeMcpServer.registerTool('echo', { description: 'echo' }, async () => ({
+	content: [{ type: 'text', text: 'hello' }]
+}));
+
+const fakeTransport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID() });
+await fakeMcpServer.connect(fakeTransport);
+const fakeMcp = http.createServer((req, res) => fakeTransport.handleRequest(req, res));
+await new Promise((resolve) => fakeMcp.listen(0, '127.0.0.1', resolve));
+
+const fakeUrl = `http://127.0.0.1:${fakeMcp.address().port}/mcp`;
+const configRes = await fetch(`${base}/mcp/config`, {
+	body: JSON.stringify({
+		servers: {
+			'fake-server': { transport: 'streamable_http', url: fakeUrl, useProxy: false }
+		}
+	}),
+	headers: { 'content-type': 'application/json' },
+	method: 'POST'
+});
+assert.equal(configRes.status, 200);
+const config = await configRes.json();
+assert.equal(config.servers[0].connected, true);
+assert.equal(config.servers[0].toolCount, 1);
+
+const callRes = await fetch(`${base}/mcp/call`, {
+	body: JSON.stringify({ arguments: {}, server: 'fake-server', tool: 'echo' }),
+	headers: { 'content-type': 'application/json' },
+	method: 'POST'
+});
+assert.equal(callRes.status, 200);
+assert.deepEqual(await callRes.json(), { content: 'hello', isError: false });
+
+await fakeMcpServer.close();
+fakeMcp.close();
 
 target.close();
 server.close();
