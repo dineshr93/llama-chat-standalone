@@ -16,6 +16,9 @@ const DIST = process.env.DIST || path.join(ROOT, 'ui/apps/chat/dist');
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
 const UPSTREAM = (process.env.UPSTREAM || 'http://127.0.0.1:8888').replace(/\/+$/, '');
+const UPSTREAMS_RAW = process.env.UPSTREAMS || '';
+const BACKENDS = parseBackends(UPSTREAMS_RAW);
+const MULTI = BACKENDS.length > 1;
 const MODEL_ID = process.env.MODEL_ID || 'local-model';
 const N_CTX = Number(process.env.N_CTX || 65556);
 const CHAT_TEMPLATE = process.env.CHAT_TEMPLATE || '';
@@ -26,6 +29,41 @@ const MODALITIES = new Set(
 
 // Paths the UI sends to the model server. Everything else is a static asset.
 const PROXY_PREFIXES = ['/v1', '/props', '/models', '/slots', '/tools'];
+
+// Multiple model servers are configured as `name=url,name=url`. Without
+// UPSTREAMS this stays the old single-server behavior.
+function parseBackends(raw) {
+	const entries = raw.split(',').map((s) => s.trim()).filter(Boolean);
+	if (entries.length === 0) return [{ name: 'local', url: UPSTREAM }];
+	return entries.map((entry, index) => {
+		const eq = entry.indexOf('=');
+		const name = (eq === -1 ? `backend${index + 1}` : entry.slice(0, eq)).trim();
+		const url = (eq === -1 ? entry : entry.slice(eq + 1)).trim().replace(/\/+$/, '');
+		return { name, url: url || UPSTREAM };
+	});
+}
+
+function modelKey(backend, model) {
+	return MULTI ? `${backend.name}@${model}` : model;
+}
+
+function parseModelKey(key) {
+	if (!MULTI || !key.includes('@')) return { backend: BACKENDS[0], model: key };
+	const at = key.indexOf('@');
+	const backend = BACKENDS.find((b) => b.name === key.slice(0, at));
+	return backend ? { backend, model: key.slice(at + 1) } : { backend: BACKENDS[0], model: key };
+}
+
+function normalizeStatus(status) {
+	if (status && typeof status === 'object' && 'value' in status) return status;
+	return { value: typeof status === 'string' ? status : 'loaded' };
+}
+
+function splitConvModel(conv) {
+	const sep = conv.indexOf('::');
+	if (sep === -1) return { conv, model: '' };
+	return { conv: conv.slice(0, sep), model: conv.slice(sep + 2) };
+}
 
 // The UI's MCP client prefixes the headers it wants forwarded to the target.
 const CORS_PROXY_HEADER_PREFIX = 'x-llama-server-proxy-header-';
@@ -57,7 +95,7 @@ const NO_CACHE = new Set([
 ]);
 
 /** Server properties the UI needs. llama.cpp answers /props; other engines do not. */
-export function synthProps() {
+export function synthProps(role = MULTI ? 'router' : 'model') {
 	return {
 		build_info: 'llama-chat-standalone',
 		chat_template: CHAT_TEMPLATE,
@@ -125,7 +163,7 @@ export function synthProps() {
 			vision: MODALITIES.has('vision')
 		},
 		model_path: MODEL_ID,
-		role: 'model',
+		role,
 		system_prompt: '',
 		total_slots: 1,
 		ui_settings: {}
@@ -151,20 +189,27 @@ export function synthModels() {
 	};
 }
 
-function upstreamHeaders(req) {
-	const headers = { ...req.headers, host: new URL(UPSTREAM).host };
+function upstreamHeaders(req, backend = BACKENDS[0]) {
+	const headers = { ...req.headers, host: new URL(backend.url).host };
 	delete headers['accept-encoding']; // keep the body readable for the JSON fallbacks
 	if (API_KEY && !headers.authorization) headers.authorization = `Bearer ${API_KEY}`;
 	return headers;
 }
 
 /** Buffered request, for the two endpoints that may need a fallback body. */
-function fetchUpstream(req, body, pathOverride) {
+function fetchUpstream(req, body, pathOverride, backend = BACKENDS[0]) {
 	return new Promise((resolve) => {
-		const url = new URL(UPSTREAM + (pathOverride ?? req.url));
+		const url = new URL(backend.url + (pathOverride ?? req.url));
+		const headers = upstreamHeaders(req, backend);
+
+		if (body) {
+			headers['content-length'] = String(body.length);
+			delete headers['transfer-encoding'];
+		}
+
 		const request = http.request(
 			{
-				headers: upstreamHeaders(req),
+				headers,
 				hostname: url.hostname,
 				method: req.method,
 				path: url.pathname + url.search,
@@ -196,9 +241,9 @@ function sendJson(res, status, payload, extraHeaders = {}) {
 }
 
 /** Streams the request to the model server and the answer back, unbuffered. */
-function proxy(req, res, body) {
-	const url = new URL(UPSTREAM + req.url);
-	const headers = upstreamHeaders(req);
+function proxy(req, res, body, backend = BACKENDS[0], pathOverride) {
+	const url = new URL(backend.url + (pathOverride ?? req.url));
+	const headers = upstreamHeaders(req, backend);
 
 	if (body) {
 		// a modified body must carry its own length; the upstream request has
@@ -229,6 +274,96 @@ function proxy(req, res, body) {
 	else req.pipe(request);
 }
 
+/** Proxies chat completions and rewrites response.model to the qualified id. */
+function proxyChat(req, res, body, backend, qualifiedModel) {
+	const url = new URL(backend.url + req.url);
+	const headers = upstreamHeaders(req, backend);
+	headers['content-length'] = String(body.length);
+	delete headers['transfer-encoding'];
+
+	const request = http.request(
+		{
+			headers,
+			hostname: url.hostname,
+			method: req.method,
+			path: url.pathname + url.search,
+			port: url.port || 80,
+			protocol: url.protocol
+		},
+		(response) => {
+			const contentType = response.headers['content-type'] || '';
+
+			if (contentType.includes('text/event-stream')) {
+				res.writeHead(response.statusCode, response.headers);
+				let buffer = '';
+
+				response.on('data', (chunk) => {
+					buffer += chunk.toString();
+					let index;
+
+					while ((index = buffer.indexOf('\n')) !== -1) {
+						const line = buffer.slice(0, index);
+						buffer = buffer.slice(index + 1);
+
+						if (line.startsWith('data:')) {
+							const raw = line.slice(5).trim();
+							if (raw === '[DONE]') {
+								if (!res.writableEnded) res.write(line + '\n');
+								continue;
+							}
+							try {
+								const parsed = JSON.parse(raw);
+								if (parsed && typeof parsed.model === 'string') parsed.model = qualifiedModel;
+								if (!res.writableEnded) res.write('data: ' + JSON.stringify(parsed) + '\n');
+							} catch {
+								if (!res.writableEnded) res.write(line + '\n');
+							}
+						} else if (!res.writableEnded) {
+							res.write(line + '\n');
+						}
+					}
+				});
+
+				response.on('end', () => {
+					if (buffer && !res.writableEnded) res.write(buffer);
+					res.end();
+				});
+				response.on('error', () => {
+					if (!res.writableEnded) res.end();
+				});
+				return;
+			}
+
+			const chunks = [];
+			response.on('data', (chunk) => chunks.push(chunk));
+			response.on('end', () => {
+				const raw = Buffer.concat(chunks);
+				try {
+					const parsed = JSON.parse(raw.toString());
+					if (parsed && typeof parsed.model === 'string') parsed.model = qualifiedModel;
+					const out = Buffer.from(JSON.stringify(parsed));
+					const headers = { ...response.headers, 'content-length': out.length };
+					delete headers['transfer-encoding'];
+					res.writeHead(response.statusCode, headers);
+					res.end(out);
+				} catch {
+					res.writeHead(response.statusCode, response.headers);
+					res.end(raw);
+				}
+			});
+			response.on('error', () => {
+				if (!res.writableEnded) res.end();
+			});
+		}
+	);
+
+	request.on('error', (error) => {
+		if (res.headersSent) return res.end();
+		sendJson(res, 502, { error: { message: `upstream unreachable: ${error.message}` } });
+	});
+	request.end(body);
+}
+
 /** Buffered request body, for endpoints whose JSON must be adjusted first. */
 function readBody(req) {
 	return new Promise((resolve) => {
@@ -245,7 +380,7 @@ function readBody(req) {
  * which llama.cpp uses to mean "no limit". Normalize those two differences
  * before forwarding; the rest of the request is passed through untouched.
  */
-export function normalizeChatRequest(body) {
+export function normalizeChatRequest(body, modelOverride) {
 	let parsed;
 
 	try {
@@ -256,7 +391,8 @@ export function normalizeChatRequest(body) {
 
 	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
 
-	if (!parsed.model) parsed.model = MODEL_ID;
+	if (modelOverride) parsed.model = modelOverride;
+	else if (!parsed.model) parsed.model = MODEL_ID;
 
 	if (typeof parsed.max_tokens === 'number' && parsed.max_tokens <= 0) {
 		delete parsed.max_tokens;
@@ -318,6 +454,78 @@ function corsProxy(req, res) {
 	req.pipe(request);
 }
 
+/** Merges each backend's /models/sse feed, requalifying model ids for the UI. */
+function serveModelEvents(req, res) {
+	res.writeHead(200, {
+		'cache-control': 'no-cache',
+		'connection': 'keep-alive',
+		'content-type': 'text/event-stream; charset=utf-8'
+	});
+
+	const cleanups = [];
+
+	for (const backend of BACKENDS) {
+		const url = new URL(backend.url + '/models/sse');
+		const request = http.request(
+			{
+				headers: upstreamHeaders(req, backend),
+				hostname: url.hostname,
+				method: 'GET',
+				path: url.pathname + url.search,
+				port: url.port || 80,
+				protocol: url.protocol
+			},
+			(response) => {
+				if (response.statusCode !== 200) {
+					response.resume();
+					return;
+				}
+
+				let buffer = '';
+
+				response.on('data', (chunk) => {
+					buffer += chunk.toString();
+					const records = buffer.split('\n\n');
+					buffer = records.pop();
+
+					for (const record of records) {
+						const payload = record
+							.split('\n')
+							.filter((line) => line.startsWith('data:'))
+							.map((line) => line.slice(5))
+							.join('\n')
+							.trim();
+
+						if (!payload) continue;
+
+						let parsed;
+						try {
+							parsed = JSON.parse(payload);
+						} catch {
+							if (!res.writableEnded) res.write(record + '\n\n');
+							continue;
+						}
+
+						if (parsed && typeof parsed.model === 'string') {
+							parsed.model = modelKey(backend, parsed.model);
+						}
+
+						if (!res.writableEnded) res.write('data: ' + JSON.stringify(parsed) + '\n\n');
+					}
+				});
+
+				response.on('error', () => {});
+			}
+		);
+
+		request.on('error', () => {});
+		request.end();
+		cleanups.push(() => request.destroy());
+	}
+
+	req.on('close', () => cleanups.forEach((cleanup) => cleanup()));
+}
+
 async function handleApi(req, res) {
 	const pathname = req.url.split('?')[0];
 
@@ -327,21 +535,55 @@ async function handleApi(req, res) {
 		// browser, so one synthesized fallback served during an upstream blip
 		// would stick forever and wrongly hide image upload. Never cache /props.
 		const NO_STORE = { 'cache-control': 'no-store' };
-		const { body, status } = await fetchUpstream(req);
+		const url = new URL(req.url, 'http://localhost');
+		const requested = url.searchParams.get('model');
+
+		if (requested) {
+			const { backend, model } = parseModelKey(requested);
+			url.searchParams.set('model', model);
+			const pathOverride = url.pathname + url.search;
+			const { body, status } = await fetchUpstream(req, undefined, pathOverride, backend);
+			if (status === 200) {
+				try {
+					const parsed = JSON.parse(body.toString());
+					// this server answers /cors-proxy itself, so the UI may offer it
+					parsed.cors_proxy_enabled = true;
+					return sendJson(res, 200, parsed, NO_STORE);
+				} catch {
+					// fall through to the bare retry
+				}
+			}
+			// The upstream rejected this exact request — some engines do not accept
+			// query params like autoload=false. Retry the bare /props, which every
+			// OpenAI-compatible server answers, before inventing anything.
+			const retry = await fetchUpstream(req, undefined, '/props', backend);
+			if (retry.status === 200) {
+				try {
+					const parsed = JSON.parse(retry.body.toString());
+					parsed.cors_proxy_enabled = true;
+					return sendJson(res, 200, parsed, NO_STORE);
+				} catch {
+					// fall through to the synthesized props
+				}
+			}
+			return sendJson(res, 200, synthProps('model'), NO_STORE);
+		}
+
+		// In router mode the global props only need the role; model-specific props
+		// are fetched separately for each selected model.
+		if (MULTI) return sendJson(res, 200, synthProps('router'), NO_STORE);
+
+		const { body, status } = await fetchUpstream(req, undefined, undefined, BACKENDS[0]);
 		if (status === 200) {
 			try {
 				const parsed = JSON.parse(body.toString());
-				// this server answers /cors-proxy itself, so the UI may offer it
 				parsed.cors_proxy_enabled = true;
 				return sendJson(res, 200, parsed, NO_STORE);
 			} catch {
 				// fall through to the bare retry
 			}
 		}
-		// The upstream rejected this exact request — some engines do not accept
-		// query params like autoload=false. Retry the bare /props, which every
-		// OpenAI-compatible server answers, before inventing anything.
-		const retry = await fetchUpstream(req, undefined, '/props');
+		const retry = await fetchUpstream(req, undefined, '/props', BACKENDS[0]);
 		if (retry.status === 200) {
 			try {
 				const parsed = JSON.parse(retry.body.toString());
@@ -355,23 +597,55 @@ async function handleApi(req, res) {
 	}
 
 	if (pathname === '/v1/models') {
-		const { body, status } = await fetchUpstream(req);
-		if (status === 200) {
+		if (!MULTI) {
+			const { body, status } = await fetchUpstream(req, undefined, undefined, BACKENDS[0]);
+			if (status === 200) {
+				try {
+					const parsed = JSON.parse(body.toString());
+					if (Array.isArray(parsed.data) && parsed.data.length > 0) {
+						res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+						return res.end(body);
+					}
+				} catch {
+					// fall through to the synthesized list
+				}
+			}
+			return sendJson(res, 200, synthModels());
+		}
+
+		const data = [];
+		const models = [];
+
+		for (const backend of BACKENDS) {
+			const { body, status } = await fetchUpstream(req, undefined, '/v1/models', backend);
+			if (status !== 200) continue;
+
 			try {
 				const parsed = JSON.parse(body.toString());
-				if (Array.isArray(parsed.data) && parsed.data.length > 0) {
-					res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-					return res.end(body);
+				if (!Array.isArray(parsed.data)) continue;
+
+				for (const item of parsed.data) {
+					if (!item || typeof item.id !== 'string') continue;
+
+					const actual = item.id;
+					const key = modelKey(backend, actual);
+					const name = item.name || actual;
+					const displayName = MULTI ? `${backend.name}/${name}` : name;
+
+					data.push({ ...item, id: key, name: displayName, status: normalizeStatus(item.status) });
+					models.push({ name: displayName, model: key });
 				}
 			} catch {
-				// fall through to the synthesized list
+				// this backend is unreachable or not JSON; keep the ones that answer
 			}
 		}
-		return sendJson(res, 200, synthModels());
+
+		if (data.length === 0) return sendJson(res, 200, synthModels());
+		return sendJson(res, 200, { object: 'list', data, models });
 	}
 
 	if (pathname === '/tools') {
-		const { body, status } = await fetchUpstream(req);
+		const { body, status } = await fetchUpstream(req, undefined, undefined, BACKENDS[0]);
 		if (status === 200) {
 			res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
 			return res.end(body);
@@ -379,16 +653,141 @@ async function handleApi(req, res) {
 		return sendJson(res, 200, []);
 	}
 
+	if (pathname === '/models/sse' && MULTI) {
+		return serveModelEvents(req, res);
+	}
+
+	if (pathname === '/models/load' || pathname === '/models/unload') {
+		const body = await readBody(req);
+		let parsed;
+		try {
+			parsed = JSON.parse(body.toString());
+		} catch {
+			parsed = null;
+		}
+
+		if (parsed && typeof parsed === 'object' && typeof parsed.model === 'string') {
+			const { backend, model } = parseModelKey(parsed.model);
+			parsed.model = model;
+			return proxy(req, res, Buffer.from(JSON.stringify(parsed)), backend);
+		}
+
+		return proxy(req, res, body, BACKENDS[0]);
+	}
+
+	if (pathname === '/models') {
+		const url = new URL(req.url, 'http://localhost');
+		const requested = url.searchParams.get('model');
+
+		if (requested) {
+			const { backend, model } = parseModelKey(requested);
+			url.searchParams.set('model', model);
+			return proxy(req, res, undefined, backend, url.pathname + url.search);
+		}
+
+		return proxy(req, res, undefined, BACKENDS[0]);
+	}
+
+	if (pathname === '/v1/stream') {
+		const url = new URL(req.url, 'http://localhost');
+		const conv = url.searchParams.get('conv_id') || '';
+		const { conv: bare, model } = splitConvModel(conv);
+		const resolved = model ? parseModelKey(model) : { backend: BACKENDS[0], model: '' };
+
+		if (model) url.searchParams.set('conv_id', `${bare}::${resolved.model}`);
+		return proxy(req, res, undefined, resolved.backend, url.pathname + url.search);
+	}
+
+	if (pathname === '/v1/streams/lookup' && req.method === 'POST') {
+		const body = await readBody(req);
+		let parsed;
+		try {
+			parsed = JSON.parse(body.toString());
+		} catch {
+			parsed = null;
+		}
+
+		const ids = Array.isArray(parsed?.conversation_ids) ? parsed.conversation_ids : [];
+		const groups = new Map();
+
+		for (const id of ids) {
+			if (typeof id !== 'string') continue;
+			const { conv, model } = splitConvModel(id);
+			let backend = BACKENDS[0];
+			let actual = conv;
+
+			if (model) {
+				const resolved = parseModelKey(model);
+				backend = resolved.backend;
+				actual = `${conv}::${resolved.model}`;
+			}
+
+			if (!groups.has(backend)) groups.set(backend, []);
+			groups.get(backend).push(actual);
+		}
+
+		const out = [];
+
+		for (const [backend, actualIds] of groups) {
+			const payload = Buffer.from(JSON.stringify({ conversation_ids: actualIds }));
+			const { body: responseBody, status } = await fetchUpstream(
+				req,
+				payload,
+				'/v1/streams/lookup',
+				backend
+			);
+
+			if (status !== 200) continue;
+
+			try {
+				const sessions = JSON.parse(responseBody.toString());
+				if (!Array.isArray(sessions)) continue;
+
+				for (const session of sessions) {
+					if (session && typeof session.conversation_id === 'string') {
+						const { conv, model } = splitConvModel(session.conversation_id);
+						session.conversation_id = `${conv}::${modelKey(backend, model || MODEL_ID)}`;
+					}
+					out.push(session);
+				}
+			} catch {
+				// keep whatever other backends answered
+			}
+		}
+
+		return sendJson(res, 200, out);
+	}
+
 	// The llama.cpp UI omits `model` in single-model mode, but some engines
 	// (gufo) require it, and they reject llama.cpp's -1 "no limit" sentinel.
 	// Read the body once and normalize before proxying; the SSE response
 	// still streams straight through.
-	if (pathname === '/v1/chat/completions' && req.method === 'POST') {
+	if ((pathname === '/v1/chat/completions' || pathname === '/v1/chat/completions/control') && req.method === 'POST') {
 		const body = await readBody(req);
-		return proxy(req, res, normalizeChatRequest(body));
+		let requested = '';
+		try {
+			const parsed = JSON.parse(body.toString());
+			if (parsed && typeof parsed === 'object' && typeof parsed.model === 'string') {
+				requested = parsed.model;
+			}
+		} catch {
+			// route the first backend if the body is not JSON
+		}
+
+		const conv = req.headers['x-conversation-id'];
+		const headerModel = typeof conv === 'string' ? splitConvModel(conv).model : '';
+		const chosen = requested || headerModel || MODEL_ID;
+		const { backend, model } = parseModelKey(chosen);
+
+		if (typeof conv === 'string') {
+			const { conv: bare, model: convModel } = splitConvModel(conv);
+			if (convModel) req.headers['x-conversation-id'] = `${bare}::${parseModelKey(convModel).model}`;
+		}
+
+		return proxyChat(req, res, normalizeChatRequest(body, model), backend, modelKey(backend, model));
 	}
 
-	return proxy(req, res);
+	return proxy(req, res, undefined, BACKENDS[0]);
 }
 
 function serveStatic(req, res) {
@@ -446,6 +845,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
 	createServer().listen(PORT, HOST, () => {
 		console.log(`llama-chat-standalone on http://${HOST}:${PORT}`);
-		console.log(`  upstream ${UPSTREAM}  model ${MODEL_ID}  n_ctx ${N_CTX}`);
+		console.log(`  upstreams ${BACKENDS.map((b) => `${b.name}=${b.url}`).join(' ')}`);
+		console.log(`  model ${MODEL_ID}  n_ctx ${N_CTX}  router ${MULTI}`);
 	});
 }

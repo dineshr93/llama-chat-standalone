@@ -11,6 +11,7 @@ PID_FILE := $(RUN_DIR)/server.pid
 LOG_FILE := $(RUN_DIR)/server.log
 PORT ?= 8080
 UPSTREAM ?= http://127.0.0.1:8888
+UPSTREAMS ?= workshop=http://127.0.0.1:8888,workshops=http://workshops:8888
 MODEL_ID ?= local-model
 N_CTX ?= 65556
 LLAMA_CPP_DIR ?= ../llama.cpp
@@ -20,7 +21,7 @@ LLAMA_CPP_DIR ?= ../llama.cpp
 CONTAINER_CLI ?= $(shell command -v docker >/dev/null 2>&1 && echo docker || echo podman)
 COMPOSE := $(CONTAINER_CLI) compose
 
-export PORT UPSTREAM MODEL_ID N_CTX
+export PORT UPSTREAM UPSTREAMS MODEL_ID N_CTX
 
 .PHONY: help install build dev start stop restart status logs test sync-ui \
         deploy docker-down docker-logs clean
@@ -31,7 +32,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 	@echo
-	@echo "config: PORT=$(PORT) UPSTREAM=$(UPSTREAM) MODEL_ID=$(MODEL_ID) N_CTX=$(N_CTX)"
+	@echo "config: PORT=$(PORT) UPSTREAMS=$(UPSTREAMS) MODEL_ID=$(MODEL_ID) N_CTX=$(N_CTX)"
 
 install: ## Install UI dependencies
 	cd $(APP_DIR) && npm ci

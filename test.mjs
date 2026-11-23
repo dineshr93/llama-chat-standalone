@@ -44,6 +44,7 @@ process.env.MODEL_ID = 'test-model';
 process.env.N_CTX = '4096';
 process.env.MODALITIES = 'vision';
 process.env.UPSTREAM = `http://127.0.0.1:${upstream.address().port}`;
+process.env.UPSTREAMS = ''; // keep this check on one backend; multi-backend is tested separately
 process.env.DIST = dist;
 
 const { createServer, synthModels, synthProps } = await import('./server.mjs');
