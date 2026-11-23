@@ -66,6 +66,104 @@ function splitConvModel(conv) {
 	return { conv: conv.slice(0, sep), model: conv.slice(sep + 2) };
 }
 
+// ponytail: full stream buffers live in memory; prune if long chats dominate RAM.
+const streamSessions = new Map();
+
+function getStreamSession(key) {
+	let session = streamSessions.get(key);
+
+	if (!session) {
+		session = {
+			chunks: [],
+			totalBytes: 0,
+			done: false,
+			startedAt: Date.now(),
+			completedAt: 0,
+			subscribers: new Set()
+		};
+		streamSessions.set(key, session);
+	}
+
+	return session;
+}
+
+function appendSession(session, text) {
+	const buffer = Buffer.from(text);
+	session.chunks.push(buffer);
+	session.totalBytes += buffer.length;
+
+	for (const subscriber of session.subscribers) {
+		if (!subscriber.writableEnded) subscriber.write(buffer);
+	}
+}
+
+function finishSession(session) {
+	if (!session || session.done) return;
+	session.done = true;
+	session.completedAt = Date.now();
+
+	for (const subscriber of session.subscribers) {
+		if (!subscriber.writableEnded) subscriber.end();
+	}
+	session.subscribers.clear();
+}
+
+function sessionInfo(key, session) {
+	return {
+		conversation_id: key,
+		is_done: session.done,
+		total_bytes: session.totalBytes,
+		started_at: session.startedAt,
+		completed_at: session.completedAt
+	};
+}
+
+function cancelSession(key) {
+	const session = streamSessions.get(key);
+
+	if (!session) return;
+	finishSession(session);
+	streamSessions.delete(key);
+}
+
+function replayStream(req, res) {
+	const url = new URL(req.url, 'http://localhost');
+	const key = url.searchParams.get('conv_id') || '';
+	const session = streamSessions.get(key);
+
+	if (!session) {
+		return sendJson(res, 404, { error: { message: 'no stream session' } });
+	}
+
+	const from = Number(url.searchParams.get('from') || 0);
+	let cursor = Number.isFinite(from) && from > 0 ? from : 0;
+	let offset = 0;
+
+	res.writeHead(200, {
+		'cache-control': 'no-cache',
+		'connection': 'keep-alive',
+		'content-type': 'text/event-stream; charset=utf-8'
+	});
+
+	for (const buffer of session.chunks) {
+		const start = offset;
+		offset += buffer.length;
+
+		if (offset <= cursor) continue;
+
+		res.write(buffer.subarray(Math.max(0, cursor - start)));
+		cursor = offset;
+	}
+
+	if (session.done) {
+		res.end();
+		return;
+	}
+
+	session.subscribers.add(res);
+	res.on('close', () => session.subscribers.delete(res));
+}
+
 // The UI's MCP client prefixes the headers it wants forwarded to the target.
 const CORS_PROXY_HEADER_PREFIX = 'x-llama-server-proxy-header-';
 
@@ -276,9 +374,10 @@ function proxy(req, res, body, backend = BACKENDS[0], pathOverride) {
 }
 
 /** Proxies chat completions and rewrites response.model to the qualified id. */
-function proxyChat(req, res, body, backend, qualifiedModel) {
+function proxyChat(req, res, body, backend, qualifiedModel, streamKey = '') {
 	const url = new URL(backend.url + req.url);
 	const headers = upstreamHeaders(req, backend);
+	const session = streamKey ? getStreamSession(streamKey) : null;
 	headers['content-length'] = String(body.length);
 	delete headers['transfer-encoding'];
 
@@ -298,6 +397,12 @@ function proxyChat(req, res, body, backend, qualifiedModel) {
 				res.writeHead(response.statusCode, response.headers);
 				let buffer = '';
 
+				// stream chunks are captured for replay; the live response is written separately
+				const emit = (text) => {
+					if (session) appendSession(session, text);
+					if (!res.writableEnded) res.write(text);
+				};
+
 				response.on('data', (chunk) => {
 					buffer += chunk.toString();
 					let index;
@@ -309,27 +414,29 @@ function proxyChat(req, res, body, backend, qualifiedModel) {
 						if (line.startsWith('data:')) {
 							const raw = line.slice(5).trim();
 							if (raw === '[DONE]') {
-								if (!res.writableEnded) res.write(line + '\n');
+								emit(line + '\n');
 								continue;
 							}
 							try {
 								const parsed = JSON.parse(raw);
 								if (parsed && typeof parsed.model === 'string') parsed.model = qualifiedModel;
-								if (!res.writableEnded) res.write('data: ' + JSON.stringify(parsed) + '\n');
+								emit('data: ' + JSON.stringify(parsed) + '\n');
 							} catch {
-								if (!res.writableEnded) res.write(line + '\n');
+								emit(line + '\n');
 							}
-						} else if (!res.writableEnded) {
-							res.write(line + '\n');
+						} else {
+							emit(line + '\n');
 						}
 					}
 				});
 
 				response.on('end', () => {
-					if (buffer && !res.writableEnded) res.write(buffer);
+					if (buffer) emit(buffer);
+					finishSession(session);
 					res.end();
 				});
 				response.on('error', () => {
+					finishSession(session);
 					if (!res.writableEnded) res.end();
 				});
 				return;
@@ -351,14 +458,17 @@ function proxyChat(req, res, body, backend, qualifiedModel) {
 					res.writeHead(response.statusCode, response.headers);
 					res.end(raw);
 				}
+				finishSession(session);
 			});
 			response.on('error', () => {
+				finishSession(session);
 				if (!res.writableEnded) res.end();
 			});
 		}
 	);
 
 	request.on('error', (error) => {
+		finishSession(session);
 		if (res.headersSent) return res.end();
 		sendJson(res, 502, { error: { message: `upstream unreachable: ${error.message}` } });
 	});
@@ -695,6 +805,16 @@ async function handleApi(req, res) {
 		const { conv: bare, model } = splitConvModel(conv);
 		const resolved = model ? parseModelKey(model) : { backend: BACKENDS[0], model: '' };
 
+		if (req.method === 'DELETE') {
+			cancelSession(conv);
+			if (model) url.searchParams.set('conv_id', `${bare}::${resolved.model}`);
+			return proxy(req, res, undefined, resolved.backend, url.pathname + url.search);
+		}
+
+		if (req.method === 'GET' && streamSessions.has(conv)) {
+			return replayStream(req, res);
+		}
+
 		if (model) url.searchParams.set('conv_id', `${bare}::${resolved.model}`);
 		return proxy(req, res, undefined, resolved.backend, url.pathname + url.search);
 	}
@@ -709,10 +829,18 @@ async function handleApi(req, res) {
 		}
 
 		const ids = Array.isArray(parsed?.conversation_ids) ? parsed.conversation_ids : [];
-		const groups = new Map();
+		const local = new Map();
 
 		for (const id of ids) {
 			if (typeof id !== 'string') continue;
+			const session = streamSessions.get(id);
+			if (session) local.set(id, sessionInfo(id, session));
+		}
+
+		const groups = new Map();
+
+		for (const id of ids) {
+			if (typeof id !== 'string' || local.has(id)) continue;
 			const { conv, model } = splitConvModel(id);
 			let backend = BACKENDS[0];
 			let actual = conv;
@@ -756,7 +884,7 @@ async function handleApi(req, res) {
 			}
 		}
 
-		return sendJson(res, 200, out);
+		return sendJson(res, 200, [...local.values(), ...out]);
 	}
 
 	// The llama.cpp UI omits `model` in single-model mode, but some engines
@@ -776,6 +904,7 @@ async function handleApi(req, res) {
 		}
 
 		const conv = req.headers['x-conversation-id'];
+		const streamKey = typeof conv === 'string' ? conv : '';
 		const headerModel = typeof conv === 'string' ? splitConvModel(conv).model : '';
 		const chosen = requested || headerModel || MODEL_ID;
 		const { backend, model } = parseModelKey(chosen);
@@ -785,7 +914,7 @@ async function handleApi(req, res) {
 			if (convModel) req.headers['x-conversation-id'] = `${bare}::${parseModelKey(convModel).model}`;
 		}
 
-		return proxyChat(req, res, normalizeChatRequest(body, model), backend, modelKey(backend, model));
+		return proxyChat(req, res, normalizeChatRequest(body, model), backend, modelKey(backend, model), streamKey);
 	}
 
 	return proxy(req, res, undefined, BACKENDS[0]);

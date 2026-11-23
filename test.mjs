@@ -25,6 +25,24 @@ const upstream = http.createServer((req, res) => {
 		return;
 	}
 	if (req.url.startsWith('/v1/chat/completions')) {
+		if (req.headers['x-test-stream']) {
+			res.writeHead(200, { 'content-type': 'text/event-stream' });
+			res.write('data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n');
+
+			if (req.headers['x-test-slow']) {
+				setTimeout(() => {
+					res.write('data: {"choices":[{"delta":{"content":"later"}}]}\n');
+					res.write('data: [DONE]\n');
+					res.end();
+				}, 50);
+			} else {
+				res.write('data: {"choices":[{"delta":{"content":"hello"}}]}\n');
+				res.write('data: [DONE]\n');
+				res.end();
+			}
+			return;
+		}
+
 		const chunks = [];
 		req.on('data', (chunk) => chunks.push(chunk));
 		req.on('end', () => {
@@ -97,6 +115,64 @@ const explicitModelRes = await fetch(`${base}/v1/chat/completions`, {
 	method: 'POST'
 });
 assert.equal((await explicitModelRes.json()).model, 'other-model');
+
+// server-owned stream replay: a segment started from the UI is captured and served back
+const streamRes = await fetch(`${base}/v1/chat/completions`, {
+	body: JSON.stringify({ messages: [{ content: 'hi', role: 'user' }], stream: true }),
+	headers: {
+		'content-type': 'application/json',
+		'x-conversation-id': 'test-conv::test-model',
+		'x-test-stream': '1'
+	},
+	method: 'POST'
+});
+assert.equal(streamRes.status, 200);
+const streamText = await streamRes.text();
+assert.match(streamText, /hello/);
+assert.match(streamText, /\[DONE\]/);
+
+const lookupRes = await fetch(`${base}/v1/streams/lookup`, {
+	body: JSON.stringify({ conversation_ids: ['test-conv::test-model'] }),
+	headers: { 'content-type': 'application/json' },
+	method: 'POST'
+});
+const sessions = await lookupRes.json();
+assert.equal(sessions.length, 1);
+assert.equal(sessions[0].conversation_id, 'test-conv::test-model');
+assert.equal(sessions[0].is_done, true);
+assert.equal(sessions[0].total_bytes, Buffer.byteLength(streamText));
+
+const replayRes = await fetch(
+	`${base}/v1/stream?conv_id=${encodeURIComponent('test-conv::test-model')}&from=0`
+);
+assert.equal(replayRes.status, 200);
+assert.equal(await replayRes.text(), streamText);
+
+// active session: replay returns the segment so far and tails the rest
+const slowRes = await fetch(`${base}/v1/chat/completions`, {
+	body: JSON.stringify({ messages: [{ content: 'hi', role: 'user' }], stream: true }),
+	headers: {
+		'content-type': 'application/json',
+		'x-conversation-id': 'slow-conv::test-model',
+		'x-test-stream': '1',
+		'x-test-slow': '1'
+	},
+	method: 'POST'
+});
+assert.equal(slowRes.status, 200);
+const slowReader = slowRes.body.getReader();
+const firstBytes = await slowReader.read();
+assert.equal(firstBytes.done, false);
+
+const liveReplayRes = await fetch(
+	`${base}/v1/stream?conv_id=${encodeURIComponent('slow-conv::test-model')}&from=0`
+);
+assert.equal(liveReplayRes.status, 200);
+const liveText = await liveReplayRes.text();
+assert.match(liveText, /think/);
+assert.match(liveText, /later/);
+assert.match(liveText, /\[DONE\]/);
+await slowReader.cancel();
 
 const indexRes = await fetch(`${base}/`);
 assert.equal(indexRes.status, 200);
