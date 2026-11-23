@@ -603,7 +603,10 @@ export class ChatService {
 						// reader.read() rejects with TypeError when the underlying connection drops
 						// instead of just resolving with done=true. treat it like done so the outer
 						// loop swaps reader via the resume path
-						if (isAbortError(readErr)) {
+						// only an AbortError from the request signal is intentional.
+						// a reader AbortError while the signal is live is the OS/browser
+						// cutting the socket, so treat it as a premature end and resume.
+						if (isAbortError(readErr) && abortSignal?.aborted) {
 							throw readErr;
 						}
 
