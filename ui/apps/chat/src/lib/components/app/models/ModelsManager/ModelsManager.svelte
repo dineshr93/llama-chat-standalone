@@ -92,7 +92,7 @@
 	const rankOf = (entry: ModelQuantGroup) =>
 		Math.min(...entry.quants.map((quant) => rank.get(quant.id) ?? Number.MAX_SAFE_INTEGER));
 	const byRecency = (list: ModelQuantGroup[]) =>
-		rank.size === 0 ? list : [...list].sort((a, b) => rankOf(a) - rankOf(b));
+		rank.size === 0 ? list : list.toSorted((a, b) => rankOf(a) - rankOf(b));
 	// one entry per repo, so a model with several quants takes a single table row
 	let entries = $derived(byRecency(groupModelQuants(matching)));
 	let groups = $derived.by(() => {

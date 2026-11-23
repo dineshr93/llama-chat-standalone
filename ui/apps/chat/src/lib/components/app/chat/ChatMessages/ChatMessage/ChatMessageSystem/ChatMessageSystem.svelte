@@ -91,7 +91,7 @@
 				}}
 				onkeydown={handleEditKeydown}
 				placeholder="Edit system message..."
-				style="max-height: var(--max-message-height);"
+				style="max-height: var(--max-message-height); field-sizing: content;"
 				value={editCtx.editedContent}
 			></textarea>
 

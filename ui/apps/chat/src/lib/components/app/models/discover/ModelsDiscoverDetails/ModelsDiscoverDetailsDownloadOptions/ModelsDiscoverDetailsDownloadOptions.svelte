@@ -137,7 +137,7 @@
 		const mainBits = quant ? bitsOf(main.path) : 0;
 		const exact = quant ? candidates.find((candidate) => quantOf(candidate) === quant) : undefined;
 		// the closest bit depth wins when the exact quant is missing, ties on file order
-		const closest = [...candidates].sort(
+		const closest = candidates.toSorted(
 			(a, b) => Math.abs(bitsOf(a.path) - mainBits) - Math.abs(bitsOf(b.path) - mainBits)
 		)[0];
 		const picked = exact ?? closest;

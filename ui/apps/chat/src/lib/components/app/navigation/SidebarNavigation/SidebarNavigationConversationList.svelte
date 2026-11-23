@@ -143,7 +143,7 @@
 
 		if (!order) return savedSections;
 
-		return [...savedSections].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+		return savedSections.toSorted((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 	});
 
 	// a section lists its first chats until its "Show more" row opens all of it

@@ -38,7 +38,7 @@ export function sortDraftKinds(kinds: readonly ModelDraftSidecar[]): ModelDraftS
 		return index === -1 ? DRAFT_PREFERENCE_ORDER.length : index;
 	};
 
-	return [...kinds].sort((a, b) => rank(a) - rank(b));
+	return kinds.toSorted((a, b) => rank(a) - rank(b));
 }
 
 /** Display label of a file: its quant, else the file name without the extension. */

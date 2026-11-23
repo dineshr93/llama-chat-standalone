@@ -125,7 +125,7 @@ function rankScore(path: string, query: string): number {
 }
 
 export function rankEntries(entries: GlobEntry[], query: string): GlobEntry[] {
-	return [...entries].sort(
+	return entries.toSorted(
 		(a, b) =>
 			rankScore(a.path, query) - rankScore(b.path, query) ||
 			a.path.length - b.path.length ||

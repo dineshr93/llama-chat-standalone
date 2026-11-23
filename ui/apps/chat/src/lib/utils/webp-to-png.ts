@@ -50,7 +50,7 @@ export function webpBase64UrlToPngDataURL(
 			const errorMessage = `Error converting WebP to PNG: ${message}`;
 
 			console.error(errorMessage, error);
-			reject(new Error(errorMessage));
+			reject(new Error(errorMessage, { cause: error }));
 		}
 	});
 }

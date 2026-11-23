@@ -171,7 +171,7 @@
 
 		const direction = sortAsc ? 1 : -1;
 
-		return [...entries].sort((a, b) => direction * compareEntries(a, b));
+		return entries.toSorted((a, b) => direction * compareEntries(a, b));
 	}
 
 	/** A click on a new column sorts lowest first, then highest first, then clears. */

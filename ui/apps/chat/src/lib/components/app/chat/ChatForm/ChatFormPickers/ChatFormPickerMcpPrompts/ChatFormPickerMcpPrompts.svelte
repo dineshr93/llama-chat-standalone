@@ -336,7 +336,7 @@
 	let filteredPrompts = $derived.by(() => {
 		const sortedServers = mcpStore.getServers();
 		const serverOrderMap = new Map(sortedServers.map((server, index) => [server.id, index]));
-		const sortedPrompts = [...prompts].sort((a, b) => {
+		const sortedPrompts = prompts.toSorted((a, b) => {
 			const orderA = serverOrderMap.get(a.serverName) ?? Number.MAX_SAFE_INTEGER;
 			const orderB = serverOrderMap.get(b.serverName) ?? Number.MAX_SAFE_INTEGER;
 

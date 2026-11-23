@@ -9,7 +9,7 @@
 
 	const groups = $derived.by(() => {
 		const needle = query.trim().toLowerCase();
-		const all = [...groupsStore.groups].sort((a, b) => a.name.localeCompare(b.name));
+		const all = groupsStore.groups.toSorted((a, b) => a.name.localeCompare(b.name));
 
 		return needle ? all.filter((group) => group.name.toLowerCase().includes(needle)) : all;
 	});

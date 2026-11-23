@@ -82,7 +82,7 @@ export function capImageDataURLSize(
 			const errorMessage = `Error resizing image: ${message}`;
 
 			console.error(errorMessage, error);
-			reject(new Error(errorMessage));
+			reject(new Error(errorMessage, { cause: error }));
 		}
 	});
 }

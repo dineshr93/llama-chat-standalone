@@ -369,9 +369,9 @@ export class ChatMessageFlows {
 				msg.role === MessageRole.USER && rootMessage && msg.parent === rootMessage.id;
 			const extrasToUse =
 				newExtras !== undefined
-					? JSON.parse(JSON.stringify(newExtras))
+					? structuredClone(newExtras)
 					: msg.extra
-						? JSON.parse(JSON.stringify(msg.extra))
+						? structuredClone(msg.extra)
 						: undefined;
 
 			let messageIdForResponse: string;
@@ -447,7 +447,7 @@ export class ChatMessageFlows {
 		try {
 			const updateData: Partial<DatabaseMessage> = { content: newContent };
 
-			if (newExtras !== undefined) updateData.extra = JSON.parse(JSON.stringify(newExtras));
+			if (newExtras !== undefined) updateData.extra = structuredClone(newExtras);
 
 			await DatabaseService.updateMessage(messageId, updateData);
 

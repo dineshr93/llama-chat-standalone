@@ -406,7 +406,7 @@ const blockText = ({ head, messages }: ChatBlock) => [...head, ...messages].join
 
 /** Fit a chat block into `room` chars by dropping whole messages from the less wanted end */
 function cutChat(block: ChatBlock, room: number): string {
-	const ordered = block.keepTail ? [...block.messages].reverse() : block.messages;
+	const ordered = block.keepTail ? block.messages.toReversed() : block.messages;
 	const kept: string[] = [];
 	const head = block.head.join('\n');
 

@@ -217,8 +217,7 @@ class ModelsDiscoverStore {
 	 * repo, else the first build, so repos of other orgs are covered too.
 	 */
 	private catalogBuilds(): HfCatalogBuild[] {
-		return [...this.catalog]
-			.sort((a, b) => b.released.localeCompare(a.released))
+		return this.catalog.toSorted((a, b) => b.released.localeCompare(a.released))
 			.flatMap((entry) =>
 				entry.sizes.flatMap((size) => {
 					const build = size.builds.find((b) => b.repo.startsWith('ggml-org/')) ?? size.builds[0];

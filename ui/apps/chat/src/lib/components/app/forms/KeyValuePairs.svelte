@@ -143,6 +143,7 @@
 					<textarea
 						{@attach autoResizeTextarea}
 						class="flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-base leading-5 md:text-sm placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+						style="field-sizing: content;"
 						maxlength={KEY_VALUE_PAIR_VALUE_MAX_LENGTH}
 						onblur={(e) => trimPairValue(index, e.currentTarget.value)}
 						oninput={(e) => {
