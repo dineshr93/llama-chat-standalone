@@ -48,6 +48,7 @@ import { isAbortError } from '#lib/utils/abort.ts';
 import { ApiError } from '#lib/utils/api-fetch.ts';
 import { getAuthHeaders, getJsonHeaders } from '#lib/utils/api-headers.ts';
 import { formatAttachmentText } from '#lib/utils/formatters.ts';
+import { parsePartialJsonArgs } from '#lib/utils/parse-partial-json-args.ts';
 import { streamIdentity } from '#lib/utils/stream-identity.ts';
 
 interface ResumableStreamState {
@@ -158,6 +159,29 @@ export class ChatService {
 				toolCalls = JSON.parse(message.toolCalls);
 			} catch {
 				// Ignore parse errors for malformed tool calls
+			}
+
+			// A stream paused by the browser can leave unterminated arguments in
+			// the DB. Close the partial JSON before sending history to the server.
+			if (Array.isArray(toolCalls)) {
+				for (const call of toolCalls) {
+					if (!call?.function || typeof call.function.arguments !== 'string') continue;
+
+					const trimmed = call.function.arguments.trim();
+
+					if (trimmed === '') {
+						call.function.arguments = '{}';
+						continue;
+					}
+
+					try {
+						JSON.parse(trimmed);
+					} catch {
+						const partial = parsePartialJsonArgs(trimmed);
+
+						if (partial) call.function.arguments = JSON.stringify(partial);
+					}
+				}
 			}
 		}
 

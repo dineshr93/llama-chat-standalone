@@ -80,7 +80,8 @@ import {
 	executeBrowserInfoTool,
 	executeGetDatetimeTool,
 	getAudioInputFormat,
-	isAbortError
+	isAbortError,
+	parsePartialJsonArgs
 } from '#lib/utils/index.ts';
 import { SvelteMap } from 'svelte/reactivity';
 
@@ -519,8 +520,21 @@ class AgenticStore {
 							turnContent += chunk;
 							onChunk?.(chunk);
 						},
-						onComplete: () => {
-							/* Completion handled after sendMessage resolves */
+						onComplete: (
+						_response: string,
+						_reasoningContent?: string,
+						_timings?: ChatMessageTimings,
+						finalToolCalls?: string
+					) => {
+							// The final aggregate is the last known complete tool-call state.
+							// It matters when the browser was hidden and the stream resumed.
+							if (finalToolCalls) {
+								try {
+									turnToolCalls = JSON.parse(finalToolCalls) as ApiChatCompletionToolCall[];
+								} catch {
+									/* keep the streamed state */
+								}
+							}
 						},
 						onCompletionId,
 						onError: (error: Error) => {
@@ -1045,14 +1059,46 @@ class AgenticStore {
 	private normalizeToolCalls(toolCalls: ApiChatCompletionToolCall[]): AgenticToolCallList {
 		if (!toolCalls) return [];
 
-		return toolCalls.map((call, index) => ({
-			function: {
-				arguments: call?.function?.arguments ?? '',
-				name: call?.function?.name ?? ''
-			},
-			id: call?.id ?? `tool_${index}`,
-			type: (call?.type as ToolCallType.FUNCTION) ?? ToolCallType.FUNCTION
-		}));
+		const normalized: AgenticToolCallList = [];
+
+		for (const call of toolCalls) {
+			const name = call?.function?.name ?? '';
+
+			if (!name) continue;
+
+			const args = this.normalizeToolCallArguments(call?.function?.arguments ?? '');
+
+			if (args === null) continue;
+
+			normalized.push({
+				function: { arguments: args, name },
+				id: call?.id ?? `tool_${normalized.length}`,
+				type: (call?.type as ToolCallType.FUNCTION) ?? ToolCallType.FUNCTION
+			});
+		}
+
+		return normalized;
+	}
+
+	/**
+	 * Tool calls sent back to the model must carry valid JSON. A stream paused
+	 * by the browser can leave unterminated arguments; close the partial JSON
+	 * instead of sending a raw truncated string to the server.
+	 */
+	private normalizeToolCallArguments(rawArgs: string): string | null {
+		const trimmed = rawArgs.trim();
+
+		if (trimmed === '') return '{}';
+
+		try {
+			JSON.parse(trimmed);
+
+			return trimmed;
+		} catch {
+			const partial = parsePartialJsonArgs(trimmed);
+
+			return partial ? JSON.stringify(partial) : null;
+		}
 	}
 
 	private parseToolArguments(args: string | Record<string, unknown>): Record<string, unknown> {
