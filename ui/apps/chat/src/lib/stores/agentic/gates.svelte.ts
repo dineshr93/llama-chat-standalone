@@ -29,7 +29,7 @@ export class AgenticGates {
 	private permissionResolvers = new SvelteMap<string, (decision: ToolPermissionDecision) => void>();
 
 	/** Reactive: queued steering messages to inject between turns */
-	private steeringMessages = new SvelteMap<string, SteeringMessage>();
+	private steeringMessages = new SvelteMap<string, SteeringMessage[]>();
 
 	/**
 	 * Drop all pending gate state for a conversation, e.g. when a flow exits.
@@ -39,7 +39,7 @@ export class AgenticGates {
 		this.permissionResolvers.delete(conversationId);
 		this.pendingContinueRequests.set(conversationId, false);
 		this.continueResolvers.delete(conversationId);
-		this.steeringMessages.delete(conversationId);
+		// steering messages are not gate state: leave the queue for the next turn
 	}
 
 	/**
@@ -54,11 +54,14 @@ export class AgenticGates {
 	 * Called by chatStore after the agentic flow exits.
 	 */
 	consumePendingSteeringMessage(conversationId: string): SteeringMessage | null {
-		const msg = this.steeringMessages.get(conversationId);
+		const queue = this.steeringMessages.get(conversationId);
+		const msg = queue?.[0];
 
 		if (!msg) return null;
 
-		this.steeringMessages.delete(conversationId);
+		queue!.shift();
+
+		if (!queue!.length) this.steeringMessages.delete(conversationId);
 
 		return msg;
 	}
@@ -74,15 +77,15 @@ export class AgenticGates {
 	}
 
 	getPendingSteeringMessageContent(conversationId: string): string | null {
-		return this.steeringMessages.get(conversationId)?.content ?? null;
+		return this.steeringMessages.get(conversationId)?.[0]?.content ?? null;
 	}
 
 	getPendingSteeringMessageExtras(conversationId: string): DatabaseMessageExtra[] | undefined {
-		return this.steeringMessages.get(conversationId)?.extras;
+		return this.steeringMessages.get(conversationId)?.[0]?.extras;
 	}
 
 	hasPendingSteeringMessage(conversationId: string): boolean {
-		return this.steeringMessages.has(conversationId);
+		return (this.steeringMessages.get(conversationId)?.length ?? 0) > 0;
 	}
 
 	/**
@@ -94,7 +97,10 @@ export class AgenticGates {
 		content: string,
 		extras?: DatabaseMessageExtra[]
 	): void {
-		this.steeringMessages.set(conversationId, { content, extras });
+		const queue = this.steeringMessages.get(conversationId) ?? [];
+
+		queue.push({ content, extras });
+		this.steeringMessages.set(conversationId, queue);
 	}
 
 	async requestContinue(conversationId: string, signal?: AbortSignal): Promise<boolean> {

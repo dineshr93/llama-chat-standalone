@@ -14,6 +14,7 @@ vi.mock('#lib/services/database.service.ts', () => ({
 }));
 
 import { DatabaseService } from '#lib/services/database.service.ts';
+import { agenticStore } from '#lib/stores/agentic/index.svelte.ts';
 import { chatStore } from '#lib/stores/chat/index.svelte.ts';
 import { conversationsStore } from '#lib/stores/conversations/index.svelte.ts';
 
@@ -77,5 +78,36 @@ describe('queued message isolation', () => {
 
 		expect(send).toHaveBeenCalledWith('steer a', undefined);
 		expect(chatStore.hasPendingMessage('conv-a')).toBe(false);
+	});
+
+	it('keeps every queued message instead of overwriting the first', async () => {
+		const send = vi.spyOn(chatStore, 'sendMessage').mockResolvedValue();
+
+		chatStore.injectPendingMessage('conv-a', 'first');
+		chatStore.injectPendingMessage('conv-a', 'second');
+		expect(chatStore.getPendingMessageContent('conv-a')).toBe('first');
+
+		await openConversation('conv-a');
+		await chatStore.flushPendingMessage('conv-a');
+
+		expect(send).toHaveBeenCalledWith('first', undefined);
+		expect(chatStore.getPendingMessageContent('conv-a')).toBe('second');
+
+		await chatStore.flushPendingMessage('conv-a');
+
+		expect(send).toHaveBeenCalledWith('second', undefined);
+		expect(chatStore.hasPendingMessage('conv-a')).toBe(false);
+	});
+
+	it('keeps every steering message instead of overwriting the first', () => {
+		agenticStore.injectSteeringMessage('conv-a', 'first');
+		agenticStore.injectSteeringMessage('conv-a', 'second');
+		expect(agenticStore.getPendingSteeringMessageContent('conv-a')).toBe('first');
+
+		expect(agenticStore.consumePendingSteeringMessage('conv-a')).toEqual({
+			content: 'first',
+			extras: undefined
+		});
+		expect(agenticStore.getPendingSteeringMessageContent('conv-a')).toBe('second');
 	});
 });

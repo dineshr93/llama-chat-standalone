@@ -43,6 +43,7 @@ export interface ChatStreamHost {
 		model?: string | null
 	): void;
 	clearChatStreaming(convId: string, messageId?: string): void;
+	flushPendingMessage(convId: string): Promise<void>;
 }
 
 export class ChatStreamManager {
@@ -332,13 +333,13 @@ export class ChatStreamManager {
 
 		const targetMessage = messages[targetIdx];
 		const targetMessageId = targetMessage.id;
-		// when the assistant slot already has content, the running session is a continue or
-		// another append flow and its buffer holds only the appended deltas. preserve the prefix
-		// and let the replay add to it. when the slot is empty the session buffer holds the whole
-		// message so we wipe and rebuild from byte 0
+		// a replay of a continue session holds only appended deltas; preserve the prefix and let
+		// the replay add to it. a fresh session owns the whole message, so wipe and rebuild from
+		// byte 0 even if the DB has a saved partial from an interrupted generation
 		const existingContent = targetMessage.content ?? '';
 		const existingReasoning = targetMessage.reasoningContent ?? '';
-		const isAppendMode = existingContent.length > 0;
+		const isContinue = response.headers.get('x-stream-continue') === '1';
+		const isAppendMode = isContinue && existingContent.length > 0;
 		// helper: write to the active store only when the attached conv is currently displayed.
 		// the lookup by message id is robust to reordering of activeMessages, two parallel attaches
 		// can no longer step on each other's indices
@@ -372,6 +373,7 @@ export class ChatStreamManager {
 		const cleanup = () => {
 			unlock();
 			this.host.processing.setState(convId, null);
+			void this.host.flushPendingMessage(convId);
 		};
 
 		try {
@@ -379,6 +381,7 @@ export class ChatStreamManager {
 				response,
 				(chunk: string) => {
 					streamedContent += chunk;
+					this.host.processing.markGenerating(convId);
 					const displayed = isAppendMode ? existingContent + streamedContent : streamedContent;
 
 					writeActive({ content: displayed });
@@ -416,13 +419,16 @@ export class ChatStreamManager {
 				},
 				(chunk: string) => {
 					streamedReasoningContent += chunk;
+					this.host.processing.markGenerating(convId);
 					const displayed = isAppendMode
 						? existingReasoning + streamedReasoningContent
 						: streamedReasoningContent;
 
 					writeActive({ reasoningContent: displayed });
 				},
-				undefined,
+				(chunk: string) => {
+					this.host.processing.markGenerating(convId);
+				},
 				undefined,
 				undefined,
 				undefined,

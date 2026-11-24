@@ -27,6 +27,20 @@ const upstream = http.createServer((req, res) => {
 	if (req.url.startsWith('/v1/chat/completions')) {
 		if (req.headers['x-test-stream']) {
 			res.writeHead(200, { 'content-type': 'text/event-stream' });
+
+			if (req.headers['x-test-fresh']) {
+				res.write('data: {"choices":[{"delta":{"content":"fresh"}}]}\n');
+				res.write('data: [DONE]\n');
+				res.end();
+				return;
+			}
+
+			if (req.headers['x-test-nodone']) {
+				res.write('data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n');
+				setTimeout(() => res.end(), 100);
+				return;
+			}
+
 			res.write('data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n');
 
 			if (req.headers['x-test-slow']) {
@@ -146,7 +160,61 @@ const replayRes = await fetch(
 	`${base}/v1/stream?conv_id=${encodeURIComponent('test-conv::test-model')}&from=0`
 );
 assert.equal(replayRes.status, 200);
+assert.equal(replayRes.headers.get('x-stream-done'), '1');
+assert.equal(replayRes.headers.get('x-stream-continue'), '0');
 assert.equal(await replayRes.text(), streamText);
+
+// a new POST with the same conversation id replaces the done session, not appends to it
+const secondRes = await fetch(`${base}/v1/chat/completions`, {
+	body: JSON.stringify({ messages: [{ content: 'again', role: 'user' }], stream: true }),
+	headers: {
+		'content-type': 'application/json',
+		'x-conversation-id': 'test-conv::test-model',
+		'x-test-stream': '1',
+		'x-test-fresh': '1'
+	},
+	method: 'POST'
+});
+assert.equal(secondRes.status, 200);
+const secondText = await secondRes.text();
+assert.match(secondText, /fresh/);
+assert.equal(secondText.includes('think'), false);
+
+const secondLookup = await fetch(`${base}/v1/streams/lookup`, {
+	body: JSON.stringify({ conversation_ids: ['test-conv::test-model'] }),
+	headers: { 'content-type': 'application/json' },
+	method: 'POST'
+});
+const secondSession = (await secondLookup.json())[0];
+assert.equal(secondSession.is_done, true);
+assert.equal(secondSession.total_bytes, Buffer.byteLength(secondText));
+
+const secondReplay = await fetch(
+	`${base}/v1/stream?conv_id=${encodeURIComponent('test-conv::test-model')}&from=0`
+);
+assert.equal(await secondReplay.text(), secondText);
+
+// continue mode is tagged so the UI preserves the prefix it already has
+const continueRes = await fetch(`${base}/v1/chat/completions`, {
+	body: JSON.stringify({
+		continue_final_message: true,
+		messages: [{ content: 'hi', role: 'user' }],
+		stream: true
+	}),
+	headers: {
+		'content-type': 'application/json',
+		'x-conversation-id': 'continue-conv::test-model',
+		'x-test-stream': '1'
+	},
+	method: 'POST'
+});
+assert.equal(continueRes.status, 200);
+await continueRes.text();
+
+const continueReplay = await fetch(
+	`${base}/v1/stream?conv_id=${encodeURIComponent('continue-conv::test-model')}&from=0`
+);
+assert.equal(continueReplay.headers.get('x-stream-continue'), '1');
 
 // active session: replay returns the segment so far and tails the rest
 const slowRes = await fetch(`${base}/v1/chat/completions`, {
@@ -173,6 +241,31 @@ assert.match(liveText, /think/);
 assert.match(liveText, /later/);
 assert.match(liveText, /\[DONE\]/);
 await slowReader.cancel();
+
+// upstream can end a stream without [DONE]; a live replay must still learn the session ended
+const nodoneRes = await fetch(`${base}/v1/chat/completions`, {
+	body: JSON.stringify({ messages: [{ content: 'hi', role: 'user' }], stream: true }),
+	headers: {
+		'content-type': 'application/json',
+		'x-conversation-id': 'nodone-conv::test-model',
+		'x-test-stream': '1',
+		'x-test-nodone': '1'
+	},
+	method: 'POST'
+});
+assert.equal(nodoneRes.status, 200);
+const nodoneReader = nodoneRes.body.getReader();
+const nodoneFirst = await nodoneReader.read();
+assert.equal(nodoneFirst.done, false);
+
+const nodoneReplayRes = await fetch(
+	`${base}/v1/stream?conv_id=${encodeURIComponent('nodone-conv::test-model')}&from=0`
+);
+assert.equal(nodoneReplayRes.status, 200);
+const nodoneText = await nodoneReplayRes.text();
+assert.match(nodoneText, /think/);
+assert.match(nodoneText, /\[DONE\]/);
+await nodoneReader.cancel();
 
 const indexRes = await fetch(`${base}/`);
 assert.equal(indexRes.status, 200);

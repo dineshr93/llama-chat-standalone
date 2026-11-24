@@ -66,34 +66,61 @@ function splitConvModel(conv) {
 	return { conv: conv.slice(0, sep), model: conv.slice(sep + 2) };
 }
 
-// ponytail: full stream buffers live in memory; prune if long chats dominate RAM.
+// ponytail: full stream buffers live in memory; a TTL prune keeps done sessions bounded.
+const STREAM_SESSION_TTL_MS = 30 * 60 * 1000;
 const streamSessions = new Map();
 
-function getStreamSession(key) {
-	let session = streamSessions.get(key);
+function pruneStreamSessions() {
+	const now = Date.now();
 
-	if (!session) {
-		session = {
-			chunks: [],
-			totalBytes: 0,
-			done: false,
-			startedAt: Date.now(),
-			completedAt: 0,
-			subscribers: new Set()
-		};
-		streamSessions.set(key, session);
+	for (const [key, session] of streamSessions) {
+		if (session.done && session.completedAt && now - session.completedAt > STREAM_SESSION_TTL_MS) {
+			streamSessions.delete(key);
+		}
 	}
+}
+
+function startStreamSession(key, isContinue = false) {
+	pruneStreamSessions();
+
+	const previous = streamSessions.get(key);
+
+	// a new POST means a new generation; reuse of the old buffer mixes turns
+	if (previous) {
+		finishSession(previous);
+		streamSessions.delete(key);
+	}
+
+	const session = {
+		chunks: [],
+		totalBytes: 0,
+		done: false,
+		startedAt: Date.now(),
+		completedAt: 0,
+		isContinue,
+		subscribers: new Set()
+	};
+
+	streamSessions.set(key, session);
 
 	return session;
 }
 
 function appendSession(session, text) {
+	if (!session || session.done) return;
+
 	const buffer = Buffer.from(text);
 	session.chunks.push(buffer);
 	session.totalBytes += buffer.length;
 
 	for (const subscriber of session.subscribers) {
-		if (!subscriber.writableEnded) subscriber.write(buffer);
+		if (!subscriber.writableEnded) {
+			try {
+				subscriber.write(buffer);
+			} catch {
+				session.subscribers.delete(subscriber);
+			}
+		}
 	}
 }
 
@@ -103,7 +130,15 @@ function finishSession(session) {
 	session.completedAt = Date.now();
 
 	for (const subscriber of session.subscribers) {
-		if (!subscriber.writableEnded) subscriber.end();
+		if (!subscriber.writableEnded) {
+			try {
+				// a replay tail may have no [DONE] from upstream; tell the reader the session ended
+				subscriber.write('data: [DONE]\n');
+				subscriber.end();
+			} catch {
+				session.subscribers.delete(subscriber);
+			}
+		}
 	}
 	session.subscribers.clear();
 }
@@ -112,6 +147,7 @@ function sessionInfo(key, session) {
 	return {
 		conversation_id: key,
 		is_done: session.done,
+		is_continue: session.isContinue,
 		total_bytes: session.totalBytes,
 		started_at: session.startedAt,
 		completed_at: session.completedAt
@@ -142,7 +178,9 @@ function replayStream(req, res) {
 	res.writeHead(200, {
 		'cache-control': 'no-cache',
 		'connection': 'keep-alive',
-		'content-type': 'text/event-stream; charset=utf-8'
+		'content-type': 'text/event-stream; charset=utf-8',
+		'x-stream-continue': session.isContinue ? '1' : '0',
+		'x-stream-done': session.done ? '1' : '0'
 	});
 
 	for (const buffer of session.chunks) {
@@ -377,7 +415,16 @@ function proxy(req, res, body, backend = BACKENDS[0], pathOverride) {
 function proxyChat(req, res, body, backend, qualifiedModel, streamKey = '') {
 	const url = new URL(backend.url + req.url);
 	const headers = upstreamHeaders(req, backend);
-	const session = streamKey ? getStreamSession(streamKey) : null;
+	let isContinue = false;
+
+	try {
+		const parsedBody = JSON.parse(body.toString());
+		isContinue = parsedBody?.continue_final_message === true;
+	} catch {
+		/* keep false */
+	}
+
+	const session = streamKey ? startStreamSession(streamKey, isContinue) : null;
 	headers['content-length'] = String(body.length);
 	delete headers['transfer-encoding'];
 

@@ -21,7 +21,8 @@ import {
 	SSE_LINE_SEPARATOR,
 	STREAM_QUERY_PARAMS,
 	STREAM_RESUME_LOCALSTORAGE_KEY_PREFIX,
-	STREAM_VISIBILITY_KICK_MS
+	STREAM_VISIBILITY_KICK_MS,
+	STREAM_IDLE_TIMEOUT_MS
 } from '#lib/constants/index.ts';
 import {
 	AttachmentLabel,
@@ -507,6 +508,7 @@ export class ChatService {
 		// why the model stopped, length once the output limit cut the answer
 		let finishReason: string | undefined;
 		let streamFinished = false;
+		let currentResponseDone = response.headers.get('x-stream-done') === '1';
 		let modelEmitted = false;
 		let idEmitted = false;
 		let toolCallIndexOffset = 0;
@@ -593,8 +595,15 @@ export class ChatService {
 
 					let done: boolean;
 					let value: Uint8Array | undefined;
+					let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
 					try {
+						// a silent upstream must not leave the UI stuck forever; cancel the
+						// reader so the outer resume path can either fetch new bytes or error
+						idleTimer = setTimeout(() => {
+							reader!.cancel().catch(() => {});
+						}, STREAM_IDLE_TIMEOUT_MS);
+
 						const r = await reader.read();
 
 						done = r.done;
@@ -613,6 +622,8 @@ export class ChatService {
 						console.warn('reader.read() rejected, treating as premature end:', readErr);
 						done = true;
 						value = undefined;
+					} finally {
+						if (idleTimer !== undefined) clearTimeout(idleTimer);
 					}
 
 					if (done) break;
@@ -720,6 +731,12 @@ export class ChatService {
 				// inner reader done, decide whether to try a resume
 				if (abortSignal?.aborted) break;
 
+				// the server owns the session: a done replay may omit [DONE], but the header is authoritative
+				if (currentResponseDone) {
+					streamFinished = true;
+					break;
+				}
+
 				if (streamFinished) break;
 
 				if (!conversationId) break;
@@ -767,6 +784,7 @@ export class ChatService {
 				}
 				reader = newReader;
 				decoder = new TextDecoder();
+				currentResponseDone = resumeResp.headers.get('x-stream-done') === '1';
 				chunk = '';
 				segmentStartOffset = bytesParsed;
 				segmentBytesRead = 0;

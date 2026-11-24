@@ -86,7 +86,7 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 	/** Reactive: queued pending messages for non-agentic streaming */
 	private pendingMessages = new SvelteMap<
 		string,
-		{ content: string; extras?: DatabaseMessageExtra[] }
+		{ content: string; extras?: DatabaseMessageExtra[] }[]
 	>();
 	private preEncodeAbortController: AbortController | null = null;
 
@@ -343,11 +343,14 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 	consumePendingMessage(
 		convId: string
 	): { content: string; extras?: DatabaseMessageExtra[] } | null {
-		const msg = this.pendingMessages.get(convId);
+		const queue = this.pendingMessages.get(convId);
+		const msg = queue?.[0];
 
 		if (!msg) return null;
 
-		this.pendingMessages.delete(convId);
+		queue!.shift();
+
+		if (!queue!.length) this.pendingMessages.delete(convId);
 
 		return msg;
 	}
@@ -421,13 +424,17 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 	 * active and idle (e.g. after navigating back to it).
 	 */
 	async flushPendingMessage(convId: string): Promise<void> {
+		await this.flushPendingMessages(convId);
+	}
+
+	private async flushPendingMessages(convId: string): Promise<void> {
 		if (conversationsStore.activeConversation?.id !== convId) return;
 
 		if (this.isChatLoadingInternal(convId) || agenticStore.isRunning(convId)) return;
 
 		const pending = this.consumePendingMessage(convId);
 
-		if (pending) await this.sendMessage(pending.content, pending.extras);
+		if (pending) await this.sendQueuedMessage(convId, pending);
 	}
 
 	getAddFilesHandler(): ((files: File[]) => void) | null {
@@ -565,11 +572,11 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 	}
 
 	getPendingMessageContent(convId: string): string | null {
-		return this.pendingMessages.get(convId)?.content ?? null;
+		return this.pendingMessages.get(convId)?.[0]?.content ?? null;
 	}
 
 	getPendingMessageExtras(convId: string): DatabaseMessageExtra[] | undefined {
-		return this.pendingMessages.get(convId)?.extras;
+		return this.pendingMessages.get(convId)?.[0]?.extras;
 	}
 
 	getResumeModel(convId: string): string | null {
@@ -577,11 +584,14 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 	}
 
 	hasPendingMessage(convId: string): boolean {
-		return this.pendingMessages.has(convId);
+		return (this.pendingMessages.get(convId)?.length ?? 0) > 0;
 	}
 
 	injectPendingMessage(convId: string, content: string, extras?: DatabaseMessageExtra[]): void {
-		this.pendingMessages.set(convId, { content, extras });
+		const queue = this.pendingMessages.get(convId) ?? [];
+
+		queue.push({ content, extras });
+		this.pendingMessages.set(convId, queue);
 	}
 
 	isChatLoading(convId: string): boolean {
@@ -589,7 +599,11 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 	}
 
 	isChatLoadingInternal(convId: string): boolean {
-		return this.activity.isLocal(convId) || this.chatStreamingStates.has(convId);
+		return (
+			this.activity.isLocal(convId) ||
+			this.activity.isRemote(convId) ||
+			this.chatStreamingStates.has(convId)
+		);
 	}
 
 	/**
@@ -923,7 +937,8 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 		this.setChatLoading(convId, false);
 		this.clearChatStreaming(convId);
 		this.processing.setState(convId, null);
-		this.clearPendingMessage(convId);
+		// keep queued follow-ups: stop the current run, do not silently delete user input
+		await this.flushPendingMessages(convId);
 	}
 
 	async streamChatCompletion(
@@ -1146,6 +1161,7 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 			},
 			onChunk: (chunk: string) => {
 				streamedContent += chunk;
+				this.processing.markGenerating(convId);
 				updateStreamingUI();
 				this.setChatReasoning(convId, false);
 			},
@@ -1153,12 +1169,8 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 			onError: async (error: Error) => {
 				if (isAbortError(error)) {
 					cleanupStreamingState();
-					// If aborted with a pending message (e.g. "Send immediately"), re-send it
-					const pending = this.consumePendingMessage(convId);
-
-					if (pending) {
-						void this.sendQueuedMessage(convId, pending);
-					}
+					// If aborted with a pending message (e.g. "Send immediately"), send it
+					await this.flushPendingMessages(convId);
 
 					return;
 				}
@@ -1167,7 +1179,7 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 				// keep whatever was streamed so far, the message stays in memory and in DB
 				await this.savePartialResponseIfNeeded(convId);
 				cleanupStreamingState();
-				this.clearPendingMessage(convId);
+				await this.flushPendingMessages(convId);
 
 				const contextInfo = (
 					error as Error & { contextInfo?: { n_prompt_tokens: number; n_ctx: number } }
@@ -1205,6 +1217,7 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 			onModel: (modelName: string) => recordModel(modelName),
 			onReasoningChunk: (chunk: string) => {
 				streamedReasoningContent += chunk;
+				this.processing.markGenerating(convId);
 				// mark streaming state so a stop mid-thinking can persist the partial reasoning
 				this.setChatStreaming(convId, streamedContent, currentMessageId, effectiveModel);
 				const idx = conversationsStore.findMessageIndex(currentMessageId);
@@ -1218,6 +1231,7 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 				this.processing.applyStreamTimings(timings, promptProgress, convId);
 			},
 			onToolCallsStreaming: (toolCalls) => {
+				this.processing.markGenerating(convId);
 				const idx = conversationsStore.findMessageIndex(currentMessageId);
 
 				conversationsStore.updateMessageAtIndex(idx, {
@@ -1346,11 +1360,7 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 					}
 
 					// Check if there's a pending message queued during streaming
-					const pending = this.consumePendingMessage(convId);
-
-					if (pending) {
-						await this.sendQueuedMessage(convId, pending);
-					}
+					await this.flushPendingMessages(convId);
 				},
 				onCompletionId: streamCallbacks.onCompletionId,
 				onConnectionState: (state: StreamConnectionState) => {
@@ -1581,7 +1591,10 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 		msg: { content: string; extras?: DatabaseMessageExtra[] }
 	): Promise<void> {
 		if (conversationsStore.activeConversation?.id !== convId) {
-			this.pendingMessages.set(convId, msg);
+			const queue = this.pendingMessages.get(convId) ?? [];
+
+			queue.push(msg);
+			this.pendingMessages.set(convId, queue);
 
 			return;
 		}

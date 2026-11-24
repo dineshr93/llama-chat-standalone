@@ -2,6 +2,10 @@
 // while the tab was hidden. covers brief background pauses without thrashing live streams
 export const STREAM_VISIBILITY_KICK_MS = 3000;
 
+// max time a stream may stay silent before we cancel the reader and let the
+// resume path decide whether the upstream truly stalled
+export const STREAM_IDLE_TIMEOUT_MS = 60_000;
+
 // separator joining a conversation id and its per-model stream identity
 // suffix (conv::model) used by the server side replay buffer
 export const CONVERSATION_ID_SEPARATOR = '::';

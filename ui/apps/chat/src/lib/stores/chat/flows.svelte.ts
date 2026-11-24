@@ -144,6 +144,7 @@ export class ChatMessageFlows {
 					onChunk: (chunk: string) => {
 						appendedContent += chunk;
 						hasReceivedContent = true;
+						this.host.processing.markGenerating(msg.convId);
 						updateStreamingContent(originalContent + appendedContent);
 						this.host.setChatReasoning(msg.convId, false);
 					},
@@ -237,6 +238,7 @@ export class ChatMessageFlows {
 					onReasoningChunk: (chunk: string) => {
 						appendedReasoning += chunk;
 						hasReceivedContent = true;
+						this.host.processing.markGenerating(msg.convId);
 						// mark streaming state so a stop mid-thinking can persist the partial reasoning
 						this.host.setChatStreaming(msg.convId, originalContent + appendedContent, msg.id);
 						conversationsStore.updateMessageAtIndex(conversationsStore.findMessageIndex(msg.id), {

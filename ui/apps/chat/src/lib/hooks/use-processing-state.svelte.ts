@@ -113,7 +113,7 @@ export function useProcessingState(): UseProcessingStateReturn {
 
 				return 'Preparing response...';
 			case 'generating':
-				return '';
+				return 'Generating...';
 			default:
 				return 'Processing...';
 		}
@@ -130,7 +130,7 @@ export function useProcessingState(): UseProcessingStateReturn {
 		const details: string[] = [];
 
 		// Show prompt processing progress with ETA during preparation phase
-		if (stateToUse.promptProgress) {
+		if (stateToUse.promptProgress && stateToUse.status === 'preparing') {
 			const { cache, processed, time_ms, total } = stateToUse.promptProgress;
 			const actualProcessed = processed - cache;
 			const actualTotal = total - cache;
@@ -247,7 +247,9 @@ export function useProcessingState(): UseProcessingStateReturn {
 	 * Returns a short progress message with percent
 	 */
 	function getPromptProgressText(): string | null {
-		if (!processingState?.promptProgress) return null;
+		// only the preparation phase owns prompt progress; generation output
+		// supersedes it, otherwise a 100% prompt progress stays visible forever
+		if (!processingState?.promptProgress || processingState.status !== 'preparing') return null;
 
 		const { cache, processed, total } = processingState.promptProgress;
 		const actualProcessed = processed - cache;

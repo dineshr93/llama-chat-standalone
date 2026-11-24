@@ -120,6 +120,32 @@ export class ChatProcessingStore {
 		}
 	}
 
+	/**
+	 * Marks the conversation as generating as soon as the first output chunk
+	 * arrives. Prompt progress can hit 100% before any output token is emitted,
+	 * so the status must move off 'preparing' to stop the UI from showing a
+	 * stale "Processing 100% (ETA: 0s)" label during generation.
+	 */
+	markGenerating(conversationId?: string): void {
+		const targetId = conversationId || this._activeConversationId;
+
+		if (!targetId) return;
+
+		const state = this.states.get(targetId);
+
+		if (state?.status === 'generating') return;
+
+		if (state) {
+			this.setState(targetId, { ...state, status: 'generating', hasNextToken: true });
+		} else {
+			// first chunk before any timing event; seed a minimal generating state
+			this.updateFromTimings(
+				{ cache_n: 0, predicted_n: 1, predicted_per_second: 0, prompt_n: 0 },
+				targetId
+			);
+		}
+	}
+
 	private getContextTotal(): number | null {
 		const activeConvId = this._activeConversationId;
 		const activeState = activeConvId ? this.getState(activeConvId) : null;
@@ -162,6 +188,7 @@ export class ChatProcessingStore {
 		const progressPercent = promptProgress
 			? Math.round((progressActualDone / progressActualTotal) * 100)
 			: undefined;
+		const promptComplete = promptProgress && progressActualDone >= progressActualTotal;
 
 		return {
 			cacheTokens,
@@ -175,7 +202,7 @@ export class ChatProcessingStore {
 			promptProgress,
 			promptTokens,
 			speculative: false,
-			status: predictedTokens > 0 ? 'generating' : promptProgress ? 'preparing' : 'idle',
+			status: predictedTokens > 0 || promptComplete ? 'generating' : promptProgress ? 'preparing' : 'idle',
 			temperature: currentConfig.temperature ?? 0.8,
 			tokensDecoded: predictedTokens,
 			tokensPerSecond,
